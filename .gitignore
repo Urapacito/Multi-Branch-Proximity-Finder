@@ -1,0 +1,18 @@
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.sublime-project
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local Environment / Sensitive Data
+.env
+.env.local
+
+# Logs
+*.log
+npm-debug.log*
