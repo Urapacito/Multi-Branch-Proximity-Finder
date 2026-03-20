@@ -83,6 +83,7 @@ export function createRowManager({ destinationRowsEl }) {
       coords: null,
       label: "",
       provider: "manual",
+      isFavorite: false,
       verificationState: "exact",
       sourceOfTruth: "query",
       displayIndex: 0,

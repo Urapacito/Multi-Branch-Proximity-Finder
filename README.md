@@ -14,6 +14,7 @@ The app supports (so far):
 - Draggable markers for manual correction and verification.
 - Ranked results (closest to furthest) based on road distance, not straight-line distance.
 - Route-level interaction with waypoint injection/removal and immediate recalculation.
+- Named Favorites saved in `localStorage` with one-click destination reuse.
 - Explainable geocoding confidence states (`RED`, `ORANGE`, `GREY`) for operational trust.
 
 ## System Architecture
@@ -52,6 +53,7 @@ Primary responsibility: provider communication, normalization, retries, and erro
 Key module:
 
 - `js/repositories/geoRepository.js`: Photon/Nominatim/OSRM I/O with endpoint fallback, timeout, retry, and normalized return models.
+- `js/repositories/favRepository.js`: localStorage-backed named favorites (`getAll`, `add`, `remove`).
 
 ## Separation of Concerns and Provider Swapping
 
@@ -113,6 +115,16 @@ Waypoint lifecycle is explicitly managed as stateful application logic:
 
 This keeps route geometry, UI markers, and internal waypoint arrays consistent across all transitions.
 
+### Named Favorites Lifecycle
+
+Favorites are treated as first-class reusable coordinates:
+
+1. User clicks the heart action on a result card.
+2. A naming modal captures a human-friendly label.
+3. The app saves `{ name, lat, lon }` to `localStorage` through `FavRepository`.
+4. Favorite dropdown (next to Add Destination) renders all saved entries.
+5. Selecting a favorite creates a destination row prefilled with coordinates and renders a light-pink marker (`marker-pink`) for quick visual differentiation.
+
 ## Performance and Optimization
 
 ### Request Debouncing and Flood Control
@@ -143,6 +155,7 @@ Branch Routes uses a practical, logistics-oriented UI language:
 - Structured sidebar with sticky controls for repeated operational use.
 - Distance chips, method badges, and verification cues for fast decision-making.
 - Hover route tooltip for split-distance context (`from start` / `to destination`).
+- Favorite control stack with heart actions, naming modal, and saved-location dropdown for repeat operations.
 
 ## Installation
 
@@ -209,6 +222,7 @@ js/
   controllers/
     mapController.js
   repositories/
+    favRepository.js
     geoRepository.js
   services/
     geoMath.js

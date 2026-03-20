@@ -247,6 +247,107 @@ input:focus {
   margin-top: 10px;
 }
 
+.destination-actions-row {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.favorite-btn {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.favorite-btn i {
+  color: #db2777;
+}
+
+.favorite-dropdown {
+  margin-top: 8px;
+  border: 1px solid #d6deec;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgba(14, 35, 78, 0.12);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.favorite-item {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid #edf2fb;
+  border-radius: 0;
+  background: transparent;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 10px;
+}
+
+.favorite-item:last-child {
+  border-bottom: none;
+}
+
+.favorite-item:hover {
+  background: #f7f9fe;
+}
+
+.favorite-select-btn {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: #1f3355;
+  text-align: left;
+  padding: 6px 4px;
+  display: grid;
+  gap: 3px;
+}
+
+.favorite-item-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.favorite-item-coords {
+  font-size: 0.78rem;
+  color: #6d7d98;
+}
+
+.favorite-delete-btn {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 999px;
+  padding: 0;
+  background: transparent;
+  color: #9aa5b5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  line-height: 1;
+  transition: background-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+}
+
+.favorite-delete-btn:hover {
+  color: #dc2626;
+  background: #fee2e2;
+  transform: scale(1.06);
+}
+
+.favorite-empty {
+  padding: 10px 12px;
+  color: #6b7b97;
+  font-size: 0.86rem;
+}
+
 .remove-btn {
   width: 28px;
   min-width: 28px;
@@ -450,6 +551,22 @@ button {
   color: #243a5f;
 }
 
+.favorite-marker-btn {
+  width: 100%;
+  margin-top: 6px;
+  background: #fff1f8;
+  color: #9d174d;
+  border: 1px solid #f9c6dd;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.favorite-marker-btn i {
+  color: #db2777;
+}
+
 .map-wrap {
   min-width: 0;
   position: relative;
@@ -578,6 +695,19 @@ button {
 body.route-waypoint-dragging,
 body.route-waypoint-dragging * {
   cursor: grabbing !important;
+}
+
+.marker-pink span {
+  box-shadow: 0 0 0 2px rgba(244, 114, 182, 0.35) !important;
+}
+
+.destination-div-icon.marker-pink {
+  filter: saturate(1.12) drop-shadow(0 3px 6px rgba(190, 24, 93, 0.28));
+}
+
+.destination-div-icon.marker-pink > span > span:first-child {
+  background: #f472b6 !important;
+  border-color: #ffffff !important;
 }
 
 #intro-modal-overlay {
@@ -745,6 +875,52 @@ body.route-waypoint-dragging * {
   justify-content: center;
   padding: 18px;
   z-index: 2500;
+}
+
+#naming-modal-overlay {
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+#naming-modal-content {
+  width: min(92vw, 460px);
+  max-width: 460px;
+  align-items: stretch;
+  margin: auto;
+}
+
+#naming-modal-content .about-modal-body {
+  width: 100%;
+}
+
+#naming-modal-content .about-modal-body label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #334766;
+}
+
+#naming-modal-content .about-modal-footer {
+  width: 100%;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+#save-favorite-btn {
+  min-width: 128px;
+  transition: background-color 0.22s ease, border-color 0.22s ease, color 0.22s ease;
+}
+
+#save-favorite-btn.is-success {
+  background: #16a34a;
+  border-color: #15803d;
+  color: #ffffff;
+}
+
+#save-favorite-btn.is-success i {
+  margin-right: 6px;
 }
 
 .app-modal-content {

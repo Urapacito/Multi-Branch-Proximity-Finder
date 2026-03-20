@@ -1,8 +1,10 @@
 import { getAutocompleteSuggestions, resolveLocation, routeBetween } from "./services/locationService.js";
 import { createMapController } from "./controllers/mapController.js";
 import { createUiManager } from "./ui/uiManager.js";
+import { FavRepository } from "./repositories/favRepository.js";
 
 const ui = createUiManager();
+const favRepo = new FavRepository();
 const mapCtrl = createMapController({
   onOriginDragged: async (coords) => {
     ui.elements.originInput.value = `${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`;
@@ -13,11 +15,14 @@ const mapCtrl = createMapController({
     const row = ui.state.getDestinationRows().find((r) => r.rowId === rowId);
     if (!row) return;
     row.coords = coords;
-    row.provider = "manual";
+    row.provider = row.isFavorite ? "favorite" : "manual";
     row.sourceOfTruth = "manual-drag";
     row.input.value = `${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`;
     ui.state.setRowVerificationState(rowId, "verified");
-    mapCtrl.setDestinationMarker(rowId, row.coords, row.label || row.input.value, false, { tone: "default" });
+    mapCtrl.setDestinationMarker(rowId, row.coords, row.label || row.input.value, false, {
+      tone: row.isFavorite ? "pink" : "default",
+      isFavorite: row.isFavorite,
+    });
     ui.setStatus(`Destination ${rowId} moved. Recomputing routes...`);
     await recalculateRoutes();
   },
@@ -47,6 +52,17 @@ const mapCtrl = createMapController({
     latestResults = [...latestResults].sort((a, b) => a.roadDistanceKm - b.roadDistanceKm);
     ui.renderResults(latestResults);
   },
+  onRequestFavoriteName: async ({ defaultName, destinationId }) => {
+    const current = latestResults.find((item) => item.id === destinationId);
+    const seed = defaultName || current?.name || "";
+    return ui.openNamingModal(seed);
+  },
+  onFavoriteSaved: ({ name, lat, lon }) => {
+    const all = favRepo.add(name, lat, lon);
+    ui.renderFavorites(all);
+    ui.setStatus(`Saved favorite: ${name}`);
+    return all;
+  },
 });
 
 let latestResults = [];
@@ -70,15 +86,24 @@ async function recalculateRoutes() {
   for (const row of ui.state.getFilledDestinationRows()) {
     let resolved = null;
     if (row.sourceOfTruth === "manual-drag" && row.coords) {
+      const isFavoriteRow = Boolean(row.isFavorite) || String(row.provider || "").toUpperCase() === "FAVORITE";
       resolved = {
         ...row.coords,
         label: row.input.value,
         provider: row.provider || "manual",
         needsVerification: false,
-        markerTone: "default",
+        markerTone: isFavoriteRow ? "pink" : "default",
+        isFavorite: isFavoriteRow,
       };
     } else if (row.coords) {
-      resolved = { ...row.coords, label: row.input.value, provider: row.provider || "manual", markerTone: "default" };
+      const isFavoriteRow = Boolean(row.isFavorite) || String(row.provider || "").toUpperCase() === "FAVORITE";
+      resolved = {
+        ...row.coords,
+        label: row.input.value,
+        provider: row.provider || "manual",
+        markerTone: isFavoriteRow ? "pink" : "default",
+        isFavorite: isFavoriteRow,
+      };
     }
 
     if (!resolved) {
@@ -92,12 +117,16 @@ async function recalculateRoutes() {
 
     row.coords = { lat: resolved.lat, lng: resolved.lng };
     row.provider = resolved.provider || "manual";
+    row.isFavorite = Boolean(resolved.isFavorite) || String(row.provider || "").toUpperCase() === "FAVORITE";
     if (row.sourceOfTruth !== "manual-drag") row.sourceOfTruth = "query";
     row.label = resolved.label || row.input.value;
     row.input.value = row.label;
 
     ui.state.setRowVerificationState(row.rowId, resolved.needsVerification ? "imprecise" : "exact");
-    mapCtrl.setDestinationMarker(row.rowId, row.coords, row.label, false, { tone: resolved.markerTone || "default" });
+    mapCtrl.setDestinationMarker(row.rowId, row.coords, row.label, false, {
+      tone: resolved.markerTone || (row.isFavorite ? "pink" : "default"),
+      isFavorite: row.isFavorite,
+    });
 
     const route = await routeBetween({ lat: originResolved.lat, lng: originResolved.lng }, row.coords);
     if (!route) {
@@ -110,6 +139,8 @@ async function recalculateRoutes() {
       name: row.label,
       coords: row.coords,
       provider: row.provider,
+      source: String(row.provider || "").toUpperCase() === "FAVORITE" ? "FAVORITE" : "QUERY",
+      isFavorite: row.isFavorite,
       route,
       roadDistanceKm: route.distanceKm,
       method: resolved.method,
@@ -151,6 +182,7 @@ ui.bindDestinationAutocomplete({
     if (!row) return;
     row.coords = { lat: item.lat, lng: item.lng };
     row.provider = item.source || "photon";
+    row.isFavorite = false;
     row.sourceOfTruth = "query";
     row.label = item.label || item.address || item.name;
     row.input.value = row.label;
@@ -172,6 +204,36 @@ ui.bindDelegatedActions({
     mapCtrl.selectDestination(id, { focusMap: true });
   },
   onResultSelect: (id) => selectResult(id),
+  onResultFavorite: async (id) => {
+    const match = latestResults.find((item) => item.id === id);
+    const saved = await mapCtrl.saveDestinationAsFavorite(id, match?.name || "");
+    if (!saved) return;
+  },
+});
+
+ui.bindFavoriteControls({
+  onOpenFavorites: () => favRepo.getAll(),
+  onSelectFavorite: (favoriteId) => {
+    const favorites = favRepo.getAll();
+    const favorite = favorites.find((item) => String(item.id) === String(favoriteId));
+    if (!favorite) return;
+
+    const row = ui.addDestinationRow();
+    row.coords = { lat: Number(favorite.lat), lng: Number(favorite.lon) };
+    row.provider = "favorite";
+    row.isFavorite = true;
+    row.sourceOfTruth = "manual-drag";
+    row.label = favorite.name;
+    row.input.value = `${favorite.name} (${row.coords.lat.toFixed(6)}, ${row.coords.lng.toFixed(6)})`;
+    ui.state.setRowVerificationState(row.rowId, "verified");
+
+    mapCtrl.setDestinationMarker(row.rowId, row.coords, favorite.name, true, { tone: "pink" });
+    ui.setStatus(`Loaded favorite: ${favorite.name}`);
+  },
+  onDeleteFavorite: (favoriteId) => {
+    const next = favRepo.delete(favoriteId);
+    return next;
+  },
 });
 
 ui.elements.addDestinationBtn.addEventListener("click", () => ui.addDestinationRow());

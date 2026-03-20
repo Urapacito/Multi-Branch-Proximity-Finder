@@ -15,6 +15,8 @@ export function createMapController(options = {}) {
     onRouteUpdated,
     onRouteHover,
     onRouteHoverEnd,
+    onRequestFavoriteName,
+    onFavoriteSaved,
   } = options;
 
   const map = L.map(mapElementId, { zoomControl: true }).setView([initialView.lat, initialView.lng], initialView.zoom);
@@ -142,14 +144,34 @@ export function createMapController(options = {}) {
   }
 
   function destinationIcon(tone = "default") {
-    const color = tone === "orange" ? "#f59e0b" : tone === "grey" ? "#9aa0a6" : "#e53935";
+    const color = tone === "orange"
+      ? "#f59e0b"
+      : tone === "grey"
+        ? "#9aa0a6"
+        : tone === "pink"
+          ? "#f472b6"
+          : "#e53935";
     return L.divIcon({
-      className: "destination-div-icon",
+      className: `destination-div-icon${tone === "pink" ? " marker-pink" : ""}`,
       html: `<span style="position:relative;display:block;width:38px;height:38px;"><span style="position:absolute;left:50%;top:2px;transform:translateX(-50%) rotate(-45deg);display:block;width:24px;height:24px;border-radius:50% 50% 50% 0;background:${color};border:1.5px solid #ffffff;box-shadow:0 2px 5px rgba(0,0,0,0.32);"></span><span style="position:absolute;left:50%;top:12px;transform:translateX(-50%);display:block;width:9px;height:9px;border-radius:50%;background:#ffffff;"></span></span>`,
       iconSize: [38, 38],
       iconAnchor: [19, 38],
       popupAnchor: [0, -34],
     });
+  }
+
+  const defaultRedIcon = destinationIcon("default");
+  const pinkIcon = destinationIcon("pink");
+  const orangeIcon = destinationIcon("orange");
+  const greyIcon = destinationIcon("grey");
+
+  function resolveDestinationIcon(options = {}) {
+    const tone = String(options.tone || "").toLowerCase();
+    if (tone === "pink") return pinkIcon;
+    if (tone === "orange") return orangeIcon;
+    if (tone === "grey") return greyIcon;
+    if (options.isFavorite) return pinkIcon;
+    return defaultRedIcon;
   }
 
   function routeWaypointIcon() {
@@ -180,6 +202,29 @@ export function createMapController(options = {}) {
     if (!marker) return null;
     const latLng = marker.getLatLng();
     return { lat: latLng.lat, lng: latLng.lng };
+  }
+
+  async function saveDestinationAsFavorite(destinationId, defaultName = "") {
+    const coords = getDestinationCoords(destinationId);
+    if (!coords) return null;
+
+    const favoriteName = await onRequestFavoriteName?.({
+      destinationId,
+      defaultName,
+      lat: coords.lat,
+      lon: coords.lng,
+    });
+
+    if (!favoriteName) return null;
+
+    const saved = await onFavoriteSaved?.({
+      name: favoriteName,
+      lat: coords.lat,
+      lon: coords.lng,
+      destinationId,
+    });
+
+    return saved || { name: favoriteName, lat: coords.lat, lon: coords.lng };
   }
 
   function setActiveRouteWaypoints(destinationId) {
@@ -390,17 +435,17 @@ export function createMapController(options = {}) {
   }
 
   function setDestinationMarker(id, coords, label = "Destination", focus = false, options = {}) {
-    const tone = options.tone || "default";
+    const markerIcon = resolveDestinationIcon(options);
     const existing = destinationMarkers.get(id);
     if (existing) {
       existing.setLatLng([coords.lat, coords.lng]);
       existing.setPopupContent(`<b>${label}</b>`);
-      existing.setIcon(destinationIcon(tone));
+      existing.setIcon(markerIcon);
       if (focus) map.setView([coords.lat, coords.lng], 15);
       return;
     }
 
-    const marker = L.marker([coords.lat, coords.lng], { draggable: true, icon: destinationIcon(tone) })
+    const marker = L.marker([coords.lat, coords.lng], { draggable: true, icon: markerIcon })
       .addTo(map)
       .bindPopup(`<b>${label}</b>`);
 
@@ -413,6 +458,43 @@ export function createMapController(options = {}) {
 
     destinationMarkers.set(id, marker);
     if (focus) map.setView([coords.lat, coords.lng], 15);
+  }
+
+  function addDestinationMarkers(destinations = [], options = {}) {
+    const { focus = false } = options;
+    destinations.forEach((destination) => {
+      if (!destination?.id || !destination?.coords) return;
+
+      const lat = Number(destination.coords.lat);
+      const lon = Number(destination.coords.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+      const markerStyle = resolveDestinationIcon({
+        isFavorite: Boolean(destination.isFavorite),
+        tone: destination.tone,
+      });
+
+      const existing = destinationMarkers.get(destination.id);
+      if (existing) {
+        existing.setLatLng([lat, lon]);
+        existing.setIcon(markerStyle);
+        existing.setPopupContent(`<b>${destination.label || "Destination"}</b>`);
+      } else {
+        const marker = L.marker([lat, lon], { draggable: true, icon: markerStyle })
+          .addTo(map)
+          .bindPopup(`<b>${destination.label || "Destination"}</b>`);
+
+        marker.on("click", () => onDestinationSelected?.(destination.id));
+        marker.on("dragend", () => {
+          const moved = marker.getLatLng();
+          onDestinationDragged?.(destination.id, { lat: moved.lat, lng: moved.lng });
+        });
+
+        destinationMarkers.set(destination.id, marker);
+      }
+
+      if (focus) map.setView([lat, lon], 15);
+    });
   }
 
   function removeDestinationMarker(id) {
@@ -577,12 +659,14 @@ export function createMapController(options = {}) {
     getMapContext,
     setOrigin,
     setDestinationMarker,
+    addDestinationMarkers,
     removeDestinationMarker,
     drawRoutes,
     applyRouteSelection,
     selectDestination,
     fitToRoutesAndOrigin,
     focusDestination,
+    saveDestinationAsFavorite,
     pickOnNextMapClick,
     clearMap,
   };

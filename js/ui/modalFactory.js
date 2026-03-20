@@ -178,13 +178,19 @@ export function createModalFactory(options = {}) {
             <p><strong>"Wait, what? Draggable in OpenStreetMap!?"</strong><br>
               "..."<br>
               "..."<br>
-              <strong>"If it doesn't exist then make it so I make it"</strong>. It just more than draggable. By acting as a point, you now can use it to add stop in your route, and the engine will treat it as a verified point and apply interpolation logic to find other points around it. So it can be a powerful way to improve the accuracy of the engine when you have some knowledge about the location but it is not directly found in the database. <br>
-            </p>
-            <p><strong>"Will you steal my data?"</strong><br>
-              Tsk, I don't need to do that, your location already exist on gg map literally so you still think its secret? Literally you are using the map now.
+              <strong>"If it doesn't exist then make it so I make it"</strong>. It just more than draggable. By acting as a point, you now can use it to add stop in your route, and the engine will treat it as a verified point and apply logic to find best route through all points. Kinda suitable if you want to make plan or something.<br>
             </p>
             <p><strong>"Can the web automatic detect my location right after I enter?"</strong><br>
               Tsk, literally just click "Use My Location" button.
+            </p>
+            <p><strong>"The map render so slowly!"</strong><br>
+              Ask your internet            
+            </p>
+            <p><strong>"Why some location calculate slower than others?"</strong><br>
+              Ehehehe, the speed depends on various factors like the complexity of the address, the availability of data in the database, and the computational resources required for processing.  
+            </p>
+            <p><strong>"Will you steal my data?"</strong><br>
+              Tsk, I don't need to do that, your location already exist on gg map literally so you still think its secret? Literally you are using the map now.
             </p>
           </div>
           <div class="about-modal-footer">
@@ -329,6 +335,125 @@ export function createModalFactory(options = {}) {
     showWelcomeModal(false);
   }
 
+  function createNamingModalDom() {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = `
+      <div id="naming-modal-overlay" class="app-modal-overlay">
+        <div id="naming-modal-content" class="app-modal-content">
+          <div class="about-modal-header">
+            <span id="close-naming-modal-x" class="modal-close-x">×</span>
+            <h2>Save Favorite</h2>
+          </div>
+          <div class="about-modal-body">
+            <label for="favorite-name-input">Favorite name</label>
+            <input id="favorite-name-input" type="text" placeholder="e.g. Branch A" autocomplete="off" />
+          </div>
+          <div class="about-modal-footer">
+            <button id="save-favorite-btn" type="button" class="primary-btn">Save</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const overlay = wrapper.firstElementChild;
+    if (!overlay) return null;
+    document.body.appendChild(overlay);
+
+    const closeX = overlay.querySelector("#close-naming-modal-x");
+    closeX?.addEventListener("click", () => hideGenericModal(overlay));
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) hideGenericModal(overlay);
+    });
+
+    return overlay;
+  }
+
+  function showNamingModal(defaultName = "") {
+    return new Promise((resolve) => {
+      let overlay = document.getElementById("naming-modal-overlay");
+      if (!overlay) {
+        overlay = createNamingModalDom();
+        if (!overlay) {
+          resolve(null);
+          return;
+        }
+      }
+
+      const input = overlay.querySelector("#favorite-name-input");
+      const saveBtn = overlay.querySelector("#save-favorite-btn");
+      const closeBtn = overlay.querySelector("#close-naming-modal-x");
+      const originalSaveBtnHtml = saveBtn?.innerHTML || "Save";
+      let saveInProgress = false;
+
+      const cleanup = () => {
+        saveBtn?.removeEventListener("click", onSave);
+        input?.removeEventListener("keydown", onKeyDown);
+        closeBtn?.removeEventListener("click", onCancel);
+        overlay?.removeEventListener("click", onBackdropCancel);
+      };
+
+      const done = (value) => {
+        cleanup();
+        hideGenericModal(overlay);
+        resolve(value);
+      };
+
+      const onSave = () => {
+        if (saveInProgress) return;
+        const value = String(input?.value || "").trim();
+        if (!value) return;
+
+        saveInProgress = true;
+        if (saveBtn) {
+          saveBtn.disabled = true;
+          saveBtn.classList.add("is-success");
+          saveBtn.innerHTML = '<i class="fa-solid fa-check" aria-hidden="true"></i> Success!';
+        }
+
+        setTimeout(() => {
+          if (saveBtn) {
+            saveBtn.classList.remove("is-success");
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = originalSaveBtnHtml;
+          }
+          done(value);
+        }, 700);
+      };
+
+      const onCancel = () => done(null);
+      const onBackdropCancel = (event) => {
+        if (event.target === overlay) done(null);
+      };
+
+      const onKeyDown = (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          onSave();
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          onCancel();
+        }
+      };
+
+      saveBtn?.addEventListener("click", onSave);
+      input?.addEventListener("keydown", onKeyDown);
+      closeBtn?.addEventListener("click", onCancel);
+      overlay?.addEventListener("click", onBackdropCancel);
+
+      if (input) {
+        input.value = defaultName;
+        setTimeout(() => {
+          input.focus();
+          input.select();
+        }, 0);
+      }
+
+      overlay.style.display = "flex";
+    });
+  }
+
   return {
     hideIntroModal,
     hideGenericModal,
@@ -340,6 +465,8 @@ export function createModalFactory(options = {}) {
     showQAModal,
     createCreditModalDom,
     showCreditModal,
+    createNamingModalDom,
+    showNamingModal,
     ensureFloatingActionTriggers,
     initIntroductionModal,
   };

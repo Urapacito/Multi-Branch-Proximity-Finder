@@ -12,6 +12,8 @@ export function createUiManager() {
   const originAutocomplete = document.getElementById("originAutocomplete");
   const destinationRowsEl = document.getElementById("destinationRows");
   const addDestinationBtn = document.getElementById("addDestinationBtn");
+  const favoriteBtn = document.getElementById("favoriteBtn");
+  const favoriteDropdown = document.getElementById("favoriteDropdown");
   const useLocationBtn = document.getElementById("useLocationBtn");
   const pickOnMapBtn = document.getElementById("pickOnMapBtn");
   const calculateBtn = document.getElementById("calculateBtn");
@@ -108,6 +110,12 @@ export function createUiManager() {
     resultCount.textContent = `${results.length} result${results.length === 1 ? "" : "s"}`;
 
     results.forEach((item, index) => {
+      const source = String(item.source || item.provider || "manual").toUpperCase();
+      const canSaveFavorite = source !== "FAVORITE";
+      const favoriteActionHtml = canSaveFavorite
+        ? `<button class="favorite-marker-btn" type="button" data-action="favorite" data-destination-id="${item.id}"><i class="fa-solid fa-heart" aria-hidden="true"></i> Save Favorite</button>`
+        : "";
+
       const li = document.createElement("li");
       li.className = "result-item";
       li.dataset.destinationId = String(item.id);
@@ -116,15 +124,113 @@ export function createUiManager() {
           <p class="result-name">${index + 1}. ${item.name}</p>
           <span class="distance-chip">Road ${item.roadDistanceKm.toFixed(2)} km</span>
         </div>
-        <p class="result-meta">Source: ${(item.provider || "manual").toUpperCase()}</p>
+        <p class="result-meta">Source: ${source}</p>
         <p class="result-meta">ETA: ${item.route.durationMin.toFixed(0)} min (approx.)</p>
         <span class="result-method">Method: ${item.method || "MANUAL"}</span>
         <button class="add-marker-btn" type="button" data-action="focus" data-destination-id="${item.id}">Focus Marker</button>
+        ${favoriteActionHtml}
       `;
       resultsList.appendChild(li);
     });
 
     setActiveDestination(activeDestinationId);
+  }
+
+  function openNamingModal(defaultName = "") {
+    return modalFactory.showNamingModal(defaultName);
+  }
+
+  function renderFavorites(items = []) {
+    if (!favoriteDropdown) return;
+
+    favoriteDropdown.innerHTML = "";
+    if (!Array.isArray(items) || items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "favorite-empty";
+      empty.textContent = "No saved favorites yet.";
+      favoriteDropdown.appendChild(empty);
+      return;
+    }
+
+    items.forEach((item, index) => {
+      const row = document.createElement("div");
+      row.className = "favorite-item";
+
+      const selectBtn = document.createElement("button");
+      selectBtn.type = "button";
+      selectBtn.className = "favorite-select-btn";
+      selectBtn.dataset.action = "favorite-select";
+      selectBtn.dataset.favoriteId = String(item.id || "");
+      selectBtn.innerHTML = `
+        <span class="favorite-item-name">${item.name || `Favorite ${index + 1}`}</span>
+        <span class="favorite-item-coords">${Number(item.lat).toFixed(5)}, ${Number(item.lon).toFixed(5)}</span>
+      `;
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.type = "button";
+      deleteBtn.className = "favorite-delete-btn";
+      deleteBtn.dataset.action = "favorite-delete";
+      deleteBtn.dataset.favoriteId = String(item.id || "");
+      deleteBtn.setAttribute("aria-label", `Delete favorite ${item.name || index + 1}`);
+      deleteBtn.textContent = "×";
+
+      row.appendChild(selectBtn);
+      row.appendChild(deleteBtn);
+      favoriteDropdown.appendChild(row);
+    });
+  }
+
+  function showFavoritesDropdown() {
+    if (!favoriteDropdown || !favoriteBtn) return;
+    favoriteDropdown.classList.remove("hidden");
+    favoriteBtn.setAttribute("aria-expanded", "true");
+  }
+
+  function hideFavoritesDropdown() {
+    if (!favoriteDropdown || !favoriteBtn) return;
+    favoriteDropdown.classList.add("hidden");
+    favoriteBtn.setAttribute("aria-expanded", "false");
+  }
+
+  function bindFavoriteControls({ onOpenFavorites, onSelectFavorite, onDeleteFavorite }) {
+    if (!favoriteBtn || !favoriteDropdown) return;
+
+    favoriteBtn.addEventListener("click", async () => {
+      if (!favoriteDropdown.classList.contains("hidden")) {
+        hideFavoritesDropdown();
+        return;
+      }
+
+      const favorites = await onOpenFavorites?.();
+      renderFavorites(favorites || []);
+      showFavoritesDropdown();
+    });
+
+    favoriteDropdown.addEventListener("click", (event) => {
+      const deleteButton = event.target.closest("button[data-action='favorite-delete']");
+      if (deleteButton) {
+        event.stopPropagation();
+        const favoriteId = String(deleteButton.dataset.favoriteId || "");
+        const nextItems = onDeleteFavorite?.(favoriteId);
+        if (Array.isArray(nextItems)) {
+          renderFavorites(nextItems);
+        }
+        return;
+      }
+
+      const item = event.target.closest("button[data-action='favorite-select']");
+      if (!item) return;
+      const favoriteId = String(item.dataset.favoriteId || "");
+      onSelectFavorite?.(favoriteId);
+      hideFavoritesDropdown();
+    });
+
+    document.addEventListener("click", (event) => {
+      if (favoriteDropdown.classList.contains("hidden")) return;
+      const inDropdown = favoriteDropdown.contains(event.target);
+      const inButton = favoriteBtn.contains(event.target);
+      if (!inDropdown && !inButton) hideFavoritesDropdown();
+    });
   }
 
   function bindOriginAutocomplete({ onQuery, onSelect }) {
@@ -178,7 +284,7 @@ export function createUiManager() {
     }, true);
   }
 
-  function bindDelegatedActions({ onRemoveRow, onResultFocus, onResultSelect }) {
+  function bindDelegatedActions({ onRemoveRow, onResultFocus, onResultSelect, onResultFavorite }) {
     destinationRowsEl.addEventListener("click", (event) => {
       const button = event.target.closest("button[data-action='remove']");
       if (!button) return;
@@ -187,6 +293,13 @@ export function createUiManager() {
     });
 
     resultsList.addEventListener("click", (event) => {
+      const favoriteBtnEl = event.target.closest("button[data-action='favorite']");
+      if (favoriteBtnEl) {
+        event.stopPropagation();
+        onResultFavorite?.(favoriteBtnEl.dataset.destinationId);
+        return;
+      }
+
       const focusBtn = event.target.closest("button[data-action='focus']");
       if (focusBtn) {
         event.stopPropagation();
@@ -207,6 +320,7 @@ export function createUiManager() {
     elements: {
       originInput,
       addDestinationBtn,
+      favoriteBtn,
       useLocationBtn,
       pickOnMapBtn,
       calculateBtn,
@@ -226,6 +340,10 @@ export function createUiManager() {
     hideLoading: overlayManager.hideLoading,
     showRouteHoverTooltip: overlayManager.showRouteHoverTooltip,
     hideRouteHoverTooltip: overlayManager.hideRouteHoverTooltip,
+    openNamingModal,
+    renderFavorites,
+    bindFavoriteControls,
+    hideFavoritesDropdown,
     setLoading: overlayManager.setLoading,
     setRouteUpdating: overlayManager.setRouteUpdating,
     clearFieldErrors,

@@ -55,7 +55,14 @@
         <div id="destination-inputs">
           <label>Destinations</label>
           <div id="destinationRows" class="destination-rows"></div>
-          <button id="addDestinationBtn" type="button" class="secondary-btn add-destination-btn">+ Add Destination</button>
+          <div class="destination-actions-row">
+            <button id="addDestinationBtn" type="button" class="secondary-btn add-destination-btn">+ Add Destination</button>
+            <button id="favoriteBtn" type="button" class="secondary-btn favorite-btn" aria-haspopup="true" aria-expanded="false">
+              <i class="fa-solid fa-heart" aria-hidden="true"></i>
+              Favorite
+            </button>
+          </div>
+          <div id="favoriteDropdown" class="favorite-dropdown hidden" role="menu" aria-label="Favorite locations"></div>
 
           <p id="destinationsError" class="field-error" role="alert"></p>
           <ul id="destinationsErrorList" class="field-error-list" aria-live="polite"></ul>
