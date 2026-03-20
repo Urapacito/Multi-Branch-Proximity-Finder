@@ -55,10 +55,22 @@ const mapCtrl = createMapController({
   onRequestFavoriteName: async ({ defaultName, destinationId }) => {
     const current = latestResults.find((item) => item.id === destinationId);
     const seed = defaultName || current?.name || "";
-    return ui.openNamingModal(seed);
+    return ui.openNamingModal(seed, { destinationId });
   },
-  onFavoriteSaved: ({ name, lat, lon }) => {
+  onFavoriteSaved: ({ name, lat, lon, destinationId }) => {
     const all = favRepo.add(name, lat, lon);
+
+    const target = latestResults.find((item) => item.id === destinationId);
+    if (target) {
+      target.isFavorite = true;
+      target.source = "FAVORITE";
+      target.provider = "favorite";
+    }
+
+    if (destinationId) {
+      ui.hideResultFavoriteButton(destinationId);
+    }
+
     ui.renderFavorites(all);
     ui.setStatus(`Saved favorite: ${name}`);
     return all;

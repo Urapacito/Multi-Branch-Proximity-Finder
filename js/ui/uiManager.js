@@ -111,7 +111,8 @@ export function createUiManager() {
 
     results.forEach((item, index) => {
       const source = String(item.source || item.provider || "manual").toUpperCase();
-      const canSaveFavorite = source !== "FAVORITE";
+      const isFavorite = Boolean(item.isFavorite) || source === "FAVORITE";
+      const canSaveFavorite = !isFavorite;
       const favoriteActionHtml = canSaveFavorite
         ? `<button class="favorite-marker-btn" type="button" data-action="favorite" data-destination-id="${item.id}"><i class="fa-solid fa-heart" aria-hidden="true"></i> Save Favorite</button>`
         : "";
@@ -119,6 +120,7 @@ export function createUiManager() {
       const li = document.createElement("li");
       li.className = "result-item";
       li.dataset.destinationId = String(item.id);
+      li.dataset.destId = String(item.id);
       li.innerHTML = `
         <div class="result-top">
           <p class="result-name">${index + 1}. ${item.name}</p>
@@ -136,8 +138,13 @@ export function createUiManager() {
     setActiveDestination(activeDestinationId);
   }
 
-  function openNamingModal(defaultName = "") {
-    return modalFactory.showNamingModal(defaultName);
+  function openNamingModal(defaultName = "", options = {}) {
+    return modalFactory.showNamingModal(defaultName, options);
+  }
+
+  function hideResultFavoriteButton(destinationId) {
+    const button = resultsList.querySelector(`button[data-action='favorite'][data-destination-id='${destinationId}']`);
+    button?.classList.add("hidden");
   }
 
   function renderFavorites(items = []) {
@@ -316,6 +323,18 @@ export function createUiManager() {
   modalFactory.initIntroductionModal();
   overlayManager.initialize();
 
+  window.addEventListener("favorite:saved", (event) => {
+    const destinationId = event?.detail?.destinationId;
+    if (!destinationId) return;
+    hideResultFavoriteButton(destinationId);
+  });
+
+  window.addEventListener("favorite:save-success", (event) => {
+    const destinationId = event?.detail?.destinationId;
+    if (!destinationId) return;
+    hideResultFavoriteButton(destinationId);
+  });
+
   return {
     elements: {
       originInput,
@@ -341,6 +360,7 @@ export function createUiManager() {
     showRouteHoverTooltip: overlayManager.showRouteHoverTooltip,
     hideRouteHoverTooltip: overlayManager.hideRouteHoverTooltip,
     openNamingModal,
+    hideResultFavoriteButton,
     renderFavorites,
     bindFavoriteControls,
     hideFavoritesDropdown,

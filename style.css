@@ -441,7 +441,7 @@ button {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 #pickOnMapBtn.is-active {

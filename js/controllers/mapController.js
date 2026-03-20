@@ -204,6 +204,12 @@ export function createMapController(options = {}) {
     return { lat: latLng.lat, lng: latLng.lng };
   }
 
+  function hideFavoriteButtonInResultCard(destinationId) {
+    const card = document.querySelector(`.result-item[data-dest-id='${destinationId}']`);
+    const button = card?.querySelector("button[data-action='favorite']");
+    button?.classList.add("hidden");
+  }
+
   async function saveDestinationAsFavorite(destinationId, defaultName = "") {
     const coords = getDestinationCoords(destinationId);
     if (!coords) return null;
@@ -223,6 +229,17 @@ export function createMapController(options = {}) {
       lon: coords.lng,
       destinationId,
     });
+
+    if (saved) {
+      hideFavoriteButtonInResultCard(destinationId);
+
+      window.dispatchEvent(new CustomEvent("favorite:saved", {
+        detail: {
+          destinationId,
+          name: favoriteName,
+        },
+      }));
+    }
 
     return saved || { name: favoriteName, lat: coords.lat, lon: coords.lng };
   }

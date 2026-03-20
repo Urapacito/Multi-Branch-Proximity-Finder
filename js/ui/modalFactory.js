@@ -368,8 +368,9 @@ export function createModalFactory(options = {}) {
     return overlay;
   }
 
-  function showNamingModal(defaultName = "") {
+  function showNamingModal(defaultName = "", options = {}) {
     return new Promise((resolve) => {
+      const { destinationId = null } = options;
       let overlay = document.getElementById("naming-modal-overlay");
       if (!overlay) {
         overlay = createNamingModalDom();
@@ -409,6 +410,13 @@ export function createModalFactory(options = {}) {
           saveBtn.classList.add("is-success");
           saveBtn.innerHTML = '<i class="fa-solid fa-check" aria-hidden="true"></i> Success!';
         }
+
+        window.dispatchEvent(new CustomEvent("favorite:save-success", {
+          detail: {
+            destinationId,
+            name: value,
+          },
+        }));
 
         setTimeout(() => {
           if (saveBtn) {
