@@ -830,7 +830,9 @@ body.route-waypoint-dragging * {
 #welcome-help-trigger,
 #about-info-trigger,
 #qa-action-trigger,
-#credit-action-trigger {
+#credit-action-trigger,
+#github-link-trigger,
+#kofi-link-trigger {
   width: 45px;
   height: 45px;
   display: flex;
@@ -857,10 +859,21 @@ body.route-waypoint-dragging * {
 #welcome-help-trigger:hover,
 #about-info-trigger:hover,
 #qa-action-trigger:hover,
-#credit-action-trigger:hover {
+#credit-action-trigger:hover,
+#github-link-trigger:hover,
+#kofi-link-trigger:hover {
   background: #f0f0f0;
   transform: translateY(-1px);
   box-shadow: 0 8px 18px rgba(20, 35, 62, 0.18);
+}
+
+#github-link-trigger,
+#kofi-link-trigger {
+  text-decoration: none;
+}
+
+#kofi-link-trigger i {
+  color: #ff5f5f;
 }
 
 .app-modal-overlay {

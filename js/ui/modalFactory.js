@@ -288,6 +288,9 @@ export function createModalFactory(options = {}) {
       document.body.appendChild(container);
     }
 
+    const githubUrl = "https://github.com/Urapacito/Multi-Branch-Proximity-Finder";
+    const kofiUrl = "https://ko-fi.com/INSERT_YOUR_LINK";
+
     let helpTrigger = document.getElementById("welcome-help-trigger");
     if (!helpTrigger) {
       helpTrigger = document.createElement("button");
@@ -326,6 +329,30 @@ export function createModalFactory(options = {}) {
       creditTrigger.setAttribute("aria-label", "Open credits modal");
       creditTrigger.innerHTML = '<i class="fa-solid fa-scroll" aria-hidden="true"></i>';
       container.appendChild(creditTrigger);
+    }
+
+    let githubLinkTrigger = document.getElementById("github-link-trigger");
+    if (!githubLinkTrigger) {
+      githubLinkTrigger = document.createElement("a");
+      githubLinkTrigger.id = "github-link-trigger";
+      githubLinkTrigger.href = githubUrl;
+      githubLinkTrigger.target = "_blank";
+      githubLinkTrigger.rel = "noopener noreferrer";
+      githubLinkTrigger.setAttribute("aria-label", "Open GitHub repository");
+      githubLinkTrigger.innerHTML = '<i class="fa-brands fa-github" aria-hidden="true"></i>';
+      container.appendChild(githubLinkTrigger);
+    }
+
+    let kofiLinkTrigger = document.getElementById("kofi-link-trigger");
+    if (!kofiLinkTrigger) {
+      kofiLinkTrigger = document.createElement("a");
+      kofiLinkTrigger.id = "kofi-link-trigger";
+      kofiLinkTrigger.href = kofiUrl;
+      kofiLinkTrigger.target = "_blank";
+      kofiLinkTrigger.rel = "noopener noreferrer";
+      kofiLinkTrigger.setAttribute("aria-label", "Support on Ko-fi");
+      kofiLinkTrigger.innerHTML = '<i class="fa-solid fa-heart" aria-hidden="true"></i>';
+      container.appendChild(kofiLinkTrigger);
     }
 
     helpTrigger.onclick = () => showWelcomeModal(true);
