@@ -51,7 +51,7 @@ export function createModalFactory(options = {}) {
         <div id="intro-modal-content">
           <span id="close-modal-x">×</span>
           <h2>Branch Routes Finder</h2>
-          <img src="global/banner_intro.png" alt="Map Introduction Banner">
+          <img src="./banner_intro.png" alt="Map Introduction Banner">
           <ul class="intro-points">
             <li>Find and sort from <strong>closest to furthest</strong> locations.</li>
             <li>Visualize real road distances and travel times.</li>
