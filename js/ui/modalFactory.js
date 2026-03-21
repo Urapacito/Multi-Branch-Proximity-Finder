@@ -175,6 +175,10 @@ export function createModalFactory(options = {}) {
                 - <strong>GREY</strong> means the location is found by fuzzy search, so it is the least likely to be accurate, but still can be useful when you have no better option. <br>
               - When you see <strong>ORANGE</strong> or <strong>GREY</strong>, try to verify the location by checking the address and context, or try to drag the marker to the correct location if you know it. <br>
             </p>
+            <p><strong>"Wait wait, what about pink one?"</strong><br>
+              "..." <br>
+              How can you summon pink location if you not try to use its feature? <br>
+            </p>
             <p><strong>"Wait, what? Draggable in OpenStreetMap!?"</strong><br>
               "..."<br>
               "..."<br>
