@@ -30,6 +30,8 @@ export function createUiManager() {
 
   let activeDestinationId = null;
   const debounceTimers = new Map();
+  let shareModalBindingsInitialized = false;
+  let shareCopyResetTimer = null;
 
   const modalFactory = createModalFactory({
     introSeenKey: INTRO_SEEN_KEY,
@@ -140,6 +142,105 @@ export function createUiManager() {
 
   function openNamingModal(defaultName = "", options = {}) {
     return modalFactory.showNamingModal(defaultName, options);
+  }
+
+  function copyToClipboard(text, buttonEl) {
+    if (!text) return;
+
+    const applySuccess = () => {
+      if (!buttonEl) return;
+      const resetLabel = buttonEl.dataset.defaultLabel || "Copy";
+      if (shareCopyResetTimer) clearTimeout(shareCopyResetTimer);
+      buttonEl.classList.add("copy-success");
+      buttonEl.textContent = "✓ Copied!";
+      shareCopyResetTimer = setTimeout(() => {
+        buttonEl.classList.remove("copy-success");
+        buttonEl.textContent = resetLabel;
+      }, 2000);
+    };
+
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(applySuccess).catch(() => {
+        applySuccess();
+      });
+      return;
+    }
+
+    applySuccess();
+  }
+
+  function initializeShareModal(modalRefs) {
+    if (!modalRefs?.overlay) return;
+
+    const {
+      linkInput,
+      embedTextarea,
+      copyLinkBtn,
+      copyEmbedBtn,
+      doneBtn,
+      closeBtn,
+      overlay,
+    } = modalRefs;
+    const shareUrl = "https://multi-branch-proximity-finder.netlify.app/";
+    const iframeSnippet = `<iframe\n  src="https://multi-branch-proximity-finder.netlify.app/"\n  width="100%"\n  height="600px"\n  style="border:none;"\n  allow="geolocation">\n</iframe>`;
+
+    if (linkInput) linkInput.value = shareUrl;
+    if (embedTextarea) embedTextarea.value = iframeSnippet;
+
+    if (copyLinkBtn) copyLinkBtn.dataset.defaultLabel = "Copy";
+    if (copyEmbedBtn) copyEmbedBtn.dataset.defaultLabel = "Copy";
+
+    if (!shareModalBindingsInitialized) {
+      copyLinkBtn?.addEventListener("click", () => {
+        copyToClipboard(linkInput?.value || "", copyLinkBtn);
+      });
+
+      copyEmbedBtn?.addEventListener("click", () => {
+        copyToClipboard(embedTextarea?.value || "", copyEmbedBtn);
+      });
+
+      doneBtn?.addEventListener("click", () => {
+        modalFactory.hideGenericModal(overlay);
+      });
+
+      closeBtn?.addEventListener("click", () => {
+        modalFactory.hideGenericModal(overlay);
+      });
+
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) {
+          modalFactory.hideGenericModal(overlay);
+        }
+      });
+
+      shareModalBindingsInitialized = true;
+    }
+  }
+
+  function showShareModal() {
+    const modalRefs = modalFactory.showShareModal();
+    if (!modalRefs) return;
+
+    requestAnimationFrame(() => {
+      initializeShareModal(modalRefs);
+    });
+  }
+
+  function toggleControlsStack() {
+    const stackContent = document.getElementById("controls-stack-content");
+    const toggleButton = document.getElementById("controls-master-toggle");
+    const toggleIcon = document.getElementById("controls-master-toggle-icon");
+    if (!stackContent || !toggleButton || !toggleIcon) return;
+
+    const isCollapsed = stackContent.classList.toggle("stack-collapsed");
+    toggleButton.setAttribute("aria-expanded", String(!isCollapsed));
+
+    toggleIcon.classList.remove("fa-bars", "fa-chevron-down", "controls-toggle-rotated");
+    if (isCollapsed) {
+      toggleIcon.classList.add("fa-bars");
+    } else {
+      toggleIcon.classList.add("fa-chevron-down", "controls-toggle-rotated");
+    }
   }
 
   function hideResultFavoriteButton(destinationId) {
@@ -323,6 +424,12 @@ export function createUiManager() {
   modalFactory.initIntroductionModal();
   overlayManager.initialize();
 
+  const controlsToggleBtn = document.getElementById("controls-master-toggle");
+  const controlsStackContent = document.getElementById("controls-stack-content");
+  controlsStackContent?.classList.add("stack-collapsed");
+  controlsToggleBtn?.setAttribute("aria-expanded", "false");
+  controlsToggleBtn?.addEventListener("click", toggleControlsStack);
+
   window.addEventListener("favorite:saved", (event) => {
     const destinationId = event?.detail?.destinationId;
     if (!destinationId) return;
@@ -333,6 +440,10 @@ export function createUiManager() {
     const destinationId = event?.detail?.destinationId;
     if (!destinationId) return;
     hideResultFavoriteButton(destinationId);
+  });
+
+  window.addEventListener("share:open-request", () => {
+    showShareModal();
   });
 
   return {
@@ -360,6 +471,7 @@ export function createUiManager() {
     showRouteHoverTooltip: overlayManager.showRouteHoverTooltip,
     hideRouteHoverTooltip: overlayManager.hideRouteHoverTooltip,
     openNamingModal,
+    showShareModal,
     hideResultFavoriteButton,
     renderFavorites,
     bindFavoriteControls,

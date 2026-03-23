@@ -279,6 +279,62 @@ export function createModalFactory(options = {}) {
     overlay.style.display = "flex";
   }
 
+  function createShareModalDom() {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = `
+      <div id="share-modal-overlay" class="app-modal-overlay">
+        <div id="share-modal-content" class="app-modal-content">
+          <div class="share-modal-header">
+            <span id="close-share-modal-x" class="modal-close-x">×</span>
+            <h2>Share & Embed</h2>
+          </div>
+          <div class="share-modal-body">
+            <label for="share-link-input" class="share-label">Direct Link</label>
+            <div class="share-row">
+              <input id="share-link-input" class="share-input" type="text" readonly />
+              <button id="share-copy-link-btn" type="button" class="share-copy-btn">Copy</button>
+            </div>
+
+            <label for="share-embed-code" class="share-label">Embed Code</label>
+            <div class="share-row">
+              <textarea id="share-embed-code" class="share-textarea" rows="7" readonly></textarea>
+              <button id="share-copy-embed-btn" type="button" class="share-copy-btn">Copy</button>
+            </div>
+          </div>
+          <div class="share-modal-actions">
+            <button id="share-done-btn" type="button" class="share-done-btn">Done</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const overlay = wrapper.firstElementChild;
+    if (!overlay) return null;
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function showShareModal() {
+    let overlay = document.getElementById("share-modal-overlay");
+    if (!overlay) {
+      overlay = createShareModalDom();
+      if (!overlay) return null;
+    }
+
+    overlay.style.display = "flex";
+
+    return {
+      overlay,
+      content: overlay.querySelector("#share-modal-content"),
+      linkInput: overlay.querySelector("#share-link-input"),
+      embedTextarea: overlay.querySelector("#share-embed-code"),
+      copyLinkBtn: overlay.querySelector("#share-copy-link-btn"),
+      copyEmbedBtn: overlay.querySelector("#share-copy-embed-btn"),
+      doneBtn: overlay.querySelector("#share-done-btn"),
+      closeBtn: overlay.querySelector("#close-share-modal-x"),
+    };
+  }
+
   function ensureFloatingActionTriggers() {
     let container = document.getElementById("map-controls-wrapper");
     if (!container) {
@@ -286,6 +342,25 @@ export function createModalFactory(options = {}) {
       container.id = "map-controls-wrapper";
       container.className = "map-controls-wrapper";
       document.body.appendChild(container);
+    }
+
+    let masterToggle = document.getElementById("controls-master-toggle");
+    if (!masterToggle) {
+      masterToggle = document.createElement("button");
+      masterToggle.id = "controls-master-toggle";
+      masterToggle.type = "button";
+      masterToggle.setAttribute("aria-label", "Toggle quick controls");
+      masterToggle.setAttribute("aria-expanded", "false");
+      masterToggle.innerHTML = '<i id="controls-master-toggle-icon" class="fa-solid fa-bars" aria-hidden="true"></i>';
+      container.appendChild(masterToggle);
+    }
+
+    let stackContent = document.getElementById("controls-stack-content");
+    if (!stackContent) {
+      stackContent = document.createElement("div");
+      stackContent.id = "controls-stack-content";
+      stackContent.className = "controls-stack-content stack-collapsed";
+      container.appendChild(stackContent);
     }
 
     const githubUrl = "https://github.com/Urapacito/Multi-Branch-Proximity-Finder";
@@ -298,7 +373,6 @@ export function createModalFactory(options = {}) {
       helpTrigger.type = "button";
       helpTrigger.setAttribute("aria-label", "Open welcome help");
       helpTrigger.innerHTML = '<i class="fa-solid fa-circle-question" aria-hidden="true"></i>';
-      container.appendChild(helpTrigger);
     }
 
     let infoTrigger = document.getElementById("about-info-trigger");
@@ -308,7 +382,6 @@ export function createModalFactory(options = {}) {
       infoTrigger.type = "button";
       infoTrigger.setAttribute("aria-label", "Open about project details");
       infoTrigger.innerHTML = '<i class="fa-solid fa-circle-info" aria-hidden="true"></i>';
-      container.appendChild(infoTrigger);
     }
 
     let qaTrigger = document.getElementById("qa-action-trigger");
@@ -318,7 +391,6 @@ export function createModalFactory(options = {}) {
       qaTrigger.type = "button";
       qaTrigger.setAttribute("aria-label", "Open QA modal");
       qaTrigger.innerHTML = '<i class="fa-regular fa-comment-dots" aria-hidden="true"></i>';
-      container.appendChild(qaTrigger);
     }
 
     let creditTrigger = document.getElementById("credit-action-trigger");
@@ -328,7 +400,6 @@ export function createModalFactory(options = {}) {
       creditTrigger.type = "button";
       creditTrigger.setAttribute("aria-label", "Open credits modal");
       creditTrigger.innerHTML = '<i class="fa-solid fa-scroll" aria-hidden="true"></i>';
-      container.appendChild(creditTrigger);
     }
 
     let githubLinkTrigger = document.getElementById("github-link-trigger");
@@ -340,7 +411,6 @@ export function createModalFactory(options = {}) {
       githubLinkTrigger.rel = "noopener noreferrer";
       githubLinkTrigger.setAttribute("aria-label", "Open GitHub repository");
       githubLinkTrigger.innerHTML = '<i class="fa-brands fa-github" aria-hidden="true"></i>';
-      container.appendChild(githubLinkTrigger);
     }
 
     let kofiLinkTrigger = document.getElementById("kofi-link-trigger");
@@ -352,13 +422,38 @@ export function createModalFactory(options = {}) {
       kofiLinkTrigger.rel = "noopener noreferrer";
       kofiLinkTrigger.setAttribute("aria-label", "Support on Ko-fi");
       kofiLinkTrigger.innerHTML = '<i class="fa-solid fa-heart" aria-hidden="true"></i>';
-      container.appendChild(kofiLinkTrigger);
     }
+
+    let shareTrigger = document.getElementById("share-action-trigger");
+    if (!shareTrigger) {
+      shareTrigger = document.createElement("button");
+      shareTrigger.id = "share-action-trigger";
+      shareTrigger.type = "button";
+      shareTrigger.setAttribute("aria-label", "Open share and embed modal");
+      shareTrigger.innerHTML = '<i class="fa-solid fa-share-nodes" aria-hidden="true"></i>';
+    }
+
+    [
+      helpTrigger,
+      infoTrigger,
+      qaTrigger,
+      creditTrigger,
+      githubLinkTrigger,
+      kofiLinkTrigger,
+      shareTrigger,
+    ].forEach((control) => {
+      if (control && control.parentElement !== stackContent) {
+        stackContent.appendChild(control);
+      }
+    });
 
     helpTrigger.onclick = () => showWelcomeModal(true);
     infoTrigger.onclick = () => showAboutModal();
     qaTrigger.onclick = () => showQAModal();
     creditTrigger.onclick = () => showCreditModal();
+    shareTrigger.onclick = () => {
+      window.dispatchEvent(new CustomEvent("share:open-request"));
+    };
   }
 
   function initIntroductionModal() {
@@ -504,6 +599,8 @@ export function createModalFactory(options = {}) {
     showQAModal,
     createCreditModalDom,
     showCreditModal,
+    createShareModalDom,
+    showShareModal,
     createNamingModalDom,
     showNamingModal,
     ensureFloatingActionTriggers,
