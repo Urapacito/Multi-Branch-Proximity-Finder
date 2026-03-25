@@ -67,35 +67,35 @@ function parseHouseNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function extractHouseNumber(feature) {
+function extractHouseNumber(feature, streetHint = "") {
   const direct = parseHouseNumber(feature?.houseNumber);
   if (Number.isFinite(direct)) return direct;
 
   const name = String(feature?.name || feature?.raw?.properties?.name || "").trim();
   if (!name) return null;
 
-  // e.g. "85 Quang Trung - Bus Stop" or "195 ..."
   const leading = name.match(/^(\d+)\b/);
   if (leading) {
     const parsed = Number(leading[1]);
     if (Number.isFinite(parsed)) return parsed;
   }
 
-  // e.g. "Ngõ 195" (or generic word + number tokens)
   const ngoPattern = name.match(/\bngo\s*(\d+)\b/i);
   if (ngoPattern) {
     const parsed = Number(ngoPattern[1]);
     if (Number.isFinite(parsed)) return parsed;
   }
 
-  // e.g. "... 85 Quang Trung ..."
-  const streetPattern = name.match(/\b(\d+)\s+quang\s+trung\b/i);
-  if (streetPattern) {
-    const parsed = Number(streetPattern[1]);
-    if (Number.isFinite(parsed)) return parsed;
+  if (streetHint) {
+    const escapedStreet = streetHint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const dynamicPattern = new RegExp(`\\b(\\d+)\\s+${escapedStreet}\\b`, "i");
+    const match = name.match(dynamicPattern);
+    if (match) {
+      const parsed = Number(match[1]);
+      if (Number.isFinite(parsed)) return parsed;
+    }
   }
 
-  // Last resort: first standalone number in name.
   const fallback = name.match(/\b(\d+)\b/);
   if (fallback) {
     const parsed = Number(fallback[1]);
