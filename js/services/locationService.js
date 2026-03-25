@@ -285,6 +285,56 @@ function extractLineSegment(item) {
   };
 }
 
+function extractGeometryPath(item) {
+  const geometry = item?.raw?.geometry;
+  if (!geometry) return [];
+
+  let coords = [];
+  if (geometry.type === "LineString") {
+    coords = geometry.coordinates || [];
+  } else if (geometry.type === "MultiLineString") {
+    coords = (geometry.coordinates || []).flat();
+  }
+
+  return (coords || [])
+    .map((coord) => {
+      const lng = Number(coord?.[0]);
+      const lat = Number(coord?.[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return { lat, lng };
+    })
+    .filter(Boolean);
+}
+
+function findPathSliceBetweenAnchors(pathPoints, anchorA, anchorB) {
+  const points = GeoMath.flattenLatLngs(pathPoints);
+  if (points.length < 2 || !anchorA || !anchorB) return null;
+
+  const asLatLng = (p) => L.latLng(p.lat, p.lng);
+  const a = asLatLng(anchorA);
+  const b = asLatLng(anchorB);
+
+  const nearestIndex = (target) => {
+    let bestIdx = -1;
+    let minDist = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < points.length; i += 1) {
+      const d = points[i].distanceTo(target);
+      if (d < minDist) {
+        minDist = d;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  };
+
+  const aIdx = nearestIndex(a);
+  const bIdx = nearestIndex(b);
+  if (aIdx === -1 || bIdx === -1) return null;
+
+  if (aIdx <= bIdx) return points.slice(aIdx, bIdx + 1);
+  return points.slice(bIdx, aIdx + 1).reverse();
+}
+
 function haversineMeters(a, b) {
   const toRad = (deg) => (deg * Math.PI) / 180;
   const earthRadiusMeters = 6371000;
@@ -300,6 +350,12 @@ function haversineMeters(a, b) {
 }
 
 function pointIntoAlley(item, fallbackPoint) {
+  const pathPoints = extractGeometryPath(item);
+  if (pathPoints.length >= 2) {
+    const followed = GeoMath.followPathDistance(pathPoints, ALLEY_OFFSET_METERS);
+    if (followed) return followed;
+  }
+
   const segment = extractLineSegment(item);
   if (!segment) return fallbackPoint;
 
@@ -630,7 +686,7 @@ async function buildInterpolationCandidate(query, targetHouse, expectedDistrict,
   }
 
   // Calculate interpolation with confidence score (0.8 for virtual nodes).
-  const interpolatedResult = GeoMath.interpolateWithConfidence(
+  let interpolatedResult = GeoMath.interpolateWithConfidence(
     { lat: anchorLower.lat, lng: anchorLower.lng },
     { lat: anchorUpper.lat, lng: anchorUpper.lng },
     lowerNum,
@@ -638,6 +694,36 @@ async function buildInterpolationCandidate(query, targetHouse, expectedDistrict,
     upperNum,
     false // isExactMatch = false (virtual node)
   );
+
+  const ratio = GeoMath.interpolationRatio(lowerNum, targetHouse, upperNum);
+  const lowerPath = extractGeometryPath(anchorLower);
+  const upperPath = extractGeometryPath(anchorUpper);
+  const mergedPath = [...lowerPath, ...upperPath];
+  const pathSlice = findPathSliceBetweenAnchors(
+    mergedPath,
+    { lat: anchorLower.lat, lng: anchorLower.lng },
+    { lat: anchorUpper.lat, lng: anchorUpper.lng }
+  );
+
+  if (Number.isFinite(ratio) && pathSlice && pathSlice.length >= 2) {
+    const totalDistance = pathSlice.reduce((sum, point, index) => {
+      if (index === 0) return sum;
+      return sum + pathSlice[index - 1].distanceTo(point);
+    }, 0);
+
+    if (totalDistance > 0) {
+      const curvedPoint = GeoMath.followPathDistance(pathSlice, totalDistance * ratio);
+      if (curvedPoint) {
+        interpolatedResult = {
+          ...(interpolatedResult || {}),
+          lat: curvedPoint.lat,
+          lng: curvedPoint.lng,
+          confidence: interpolatedResult?.confidence ?? 0.8,
+          ratio,
+        };
+      }
+    }
+  }
 
   if (!interpolatedResult) {
     return null;

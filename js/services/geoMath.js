@@ -24,6 +24,40 @@ export const GeoMath = {
     return output;
   },
 
+  followPathDistance(points, distanceMeters) {
+    const path = this.flattenLatLngs(points);
+    const targetDistance = Number(distanceMeters);
+    if (path.length === 0) return null;
+    if (!Number.isFinite(targetDistance) || targetDistance <= 0) {
+      return { lat: path[0].lat, lng: path[0].lng };
+    }
+    if (path.length === 1) {
+      return { lat: path[0].lat, lng: path[0].lng };
+    }
+
+    let traveled = 0;
+    for (let i = 0; i < path.length - 1; i += 1) {
+      const start = path[i];
+      const end = path[i + 1];
+      const segmentDist = start.distanceTo(end);
+      if (!Number.isFinite(segmentDist) || segmentDist <= 0) continue;
+
+      if (traveled + segmentDist >= targetDistance) {
+        const remaining = targetDistance - traveled;
+        const ratio = Math.max(0, Math.min(1, remaining / segmentDist));
+        return {
+          lat: start.lat + (end.lat - start.lat) * ratio,
+          lng: start.lng + (end.lng - start.lng) * ratio,
+        };
+      }
+
+      traveled += segmentDist;
+    }
+
+    const last = path[path.length - 1];
+    return { lat: last.lat, lng: last.lng };
+  },
+
   // Returns snapped route point and split distances in meters for a hover coordinate.
   calculateSplitDistances(polyline, hoverLatLng) {
     if (!polyline?.getLatLngs) return null;
