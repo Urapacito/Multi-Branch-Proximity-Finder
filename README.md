@@ -4,7 +4,7 @@
 A production-grade route planning system with advanced address resolution and interactive map manipulation, designed for operational clarity and scalable geocoding accuracy.
 
 **Core Mission:**
-> Bridge the gap between vague, complex user input (Vietnamese nested addresses, manual corrections) and precise map coordinates via a deterministic confidence-grading pipeline.
+> Bridge the gap between vague, complex user input (Nested addresses, manual corrections) and precise map coordinates via a deterministic confidence-grading pipeline.
 
 **Use Case:**
 > Given one origin and many branch addresses, which destination is closest by actual road network distance? And how confident are we in each geocoded location?
@@ -106,7 +106,7 @@ The system resolves user input through an ordered confidence waterfall:
 #### **Phase 3: Decomposition**
 - Parse complex address tokens into hierarchical stack:
   - **Slash notation:** `56/1/2 Road` → `["56/1/2 Road", "56/1 Road", "56 Road"]`
-  - **Alley notation:** `38 ngõ 231 Street` → `["38 ngõ 231 Street", "ngõ 231 Street", "38 Street"]`
+  - **Alley notation:** `38 alley 231 Street` → `["38 alley 231 Street", "Alley 231 Street", "38 Street"]`
 - Extract area anchor (Ward/District/City) for bounded searches.
 - Calculate peel depth in meters for per-layer geometric offset.
 
@@ -130,13 +130,13 @@ For each search result batch:
    - Return virtual house node with `markerTone: "orange"`.
 
 3. **Alley Offset** (`confidence: 0.6`, Vietnamese-specific):
-   - Detect "ngõ XYZ" token in query and results.
+   - Detect "Alley XYZ" token in query and results.
    - Apply 20-meter perpendicular offset from street centerline.
 
 4. **Fuzzy Best-Guess** (`confidence: 0.5`, `isFuzzy: true`):
    - Score all accumulated results across all layers.
    - Apply -250 penalty for territory mismatch (safety valve).
-   - Return highest-scoring result with `markerTone: "grey"`.
+   - Return highest-scoring result with `markerTone: "GREY"`.
 
 #### **Phase 6: Cache Storage**
 - Store finalized result in LRU cache with stable key.
@@ -160,10 +160,10 @@ For each search result batch:
 **Example:**
 ```javascript
 // First call: network I/O (500ms)
-const result = await resolveLocation("56/1 Flower Street, Hoan Kiem", mapContext);
+const result = await resolveLocation("56/1 Flower Street, Lake Ward", mapContext);
 
 // Identical follow-up call: cache hit (< 50ms)
-const same = await resolveLocation("56/1 Flower Street, Hoan Kiem", mapContext);
+const same = await resolveLocation("56/1 Flower Street, Lake Ward", mapContext);
 ```
 
 ### 2. Dependency Injection
@@ -380,6 +380,17 @@ python -m http.server 8080
 Then open:
 
 - `http://localhost:8080`
+
+
+Option 3: Vite
+1. Init and install (if not yet)
+```bash
+npm install
+```
+2. Run 
+```bash
+npm run dev
+```
 
 ## API Providers
 
