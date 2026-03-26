@@ -7,6 +7,46 @@ const INTERPOLATION_TIMEOUT_MS = 15000;
 const ALLEY_OFFSET_METERS = 20;
 const anchorQueryCache = new Map();
 
+/**
+ * LRU Cache for production-grade caching of location results.
+ * Prevents redundant API calls for recently searched addresses.
+ * Limit: 50 entries to balance memory and hit rate.
+ */
+class LRULocationCache {
+  constructor(maxSize = 50) {
+    this.maxSize = maxSize;
+    this.cache = new Map();
+    this.accessOrder = [];
+  }
+
+  get(key) {
+    if (!this.cache.has(key)) return null;
+    // Move accessed key to end (most recently used)
+    this.accessOrder = this.accessOrder.filter(k => k !== key);
+    this.accessOrder.push(key);
+    return this.cache.get(key);
+  }
+
+  set(key, value) {
+    if (this.cache.has(key)) {
+      this.accessOrder = this.accessOrder.filter(k => k !== key);
+    } else if (this.accessOrder.length >= this.maxSize) {
+      // Evict least recently used (LRU)
+      const lruKey = this.accessOrder.shift();
+      this.cache.delete(lruKey);
+    }
+    this.cache.set(key, value);
+    this.accessOrder.push(key);
+  }
+
+  clear() {
+    this.cache.clear();
+    this.accessOrder = [];
+  }
+}
+
+const locationResultCache = new LRULocationCache(50);
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -840,19 +880,20 @@ function shouldSnapToPoi(result, queryTokens) {
 export function findBestMatch(results, inputQuery, options = {}) {
   if (!Array.isArray(results) || results.length === 0) return null;
 
+  // OPTIMIZATION: Pre-normalize query context to avoid repetitive normalize/toTokens in inner loops
+  const queryNormalized = normalize(inputQuery);
   const queryTokens = toTokens(inputQuery);
   const targetHouseNumber = extractQueryHouseNumber(inputQuery);
-  
-  // FIX: Use provided district OR extract from the query string (the Ward/Commune)
   const anchor = options.expectedDistrict || extractAreaAnchor(inputQuery);
-  
+  const anchorNormalized = anchor ? normalize(anchor) : null;
+
   let best = null;
   let bestScore = -Infinity;
 
+  // Single pass scoring: vectorized scoring context
   for (const item of results) {
-    // Check if result matches our Ward/City anchor
     const isAreaMatch = areaMatchesAnchor(item, anchor);
-    
+
     let score = 0;
     score += scoreType(item);
     score += scoreStreetMatch(item, queryTokens);
@@ -861,14 +902,11 @@ export function findBestMatch(results, inputQuery, options = {}) {
 
     // THE SAFETY VALVE: Prevents the marker from leaving the territory
     if (anchor && !isAreaMatch) {
-      score -= 250; // Heavy nuclear penalty
-      continue;     // Skip this result entirely
+      score -= 250;
+      continue;
     }
 
-    if (anchor && isAreaMatch) {
-      score += 40; // Reward for staying in the correct area
-    }
-
+    if (anchor && isAreaMatch) score += 40;
     if (normalize(item.source) === "photon") score += 8;
     if (normalize(item.source) === "nominatim") score += 4;
     if (shouldSnapToPoi(item, queryTokens)) score += 25;
@@ -884,7 +922,10 @@ export function findBestMatch(results, inputQuery, options = {}) {
   return {
     lat: best.lat,
     lng: best.lng,
-    label: [best.houseNumber, best.street, best.district || best.city].filter(Boolean).join(" ").trim() || best.address || inputQuery,
+    label: [best.houseNumber, best.street, best.district || best.city]
+      .filter(Boolean)
+      .join(" ")
+      .trim() || best.address || inputQuery,
     score: bestScore,
     source: best.source,
     sourceType: best.type,
@@ -893,13 +934,82 @@ export function findBestMatch(results, inputQuery, options = {}) {
   };
 }
 
+/**
+ * Compute alley offset result with depth-aware geometry path following.
+ * Modular helper to reduce cognitive load in main resolution flow.
+ */
+function computeAlleyOffsetResult(answerItem, fallbackPoint, depthMeters = ALLEY_OFFSET_METERS) {
+  const pathPoints = extractGeometryPath(answerItem);
+  if (pathPoints.length >= 2) {
+    const followed = GeoMath.followPathDistance(pathPoints, depthMeters);
+    if (followed) return followed;
+  }
+
+  const segment = extractLineSegment(answerItem);
+  if (!segment) return fallbackPoint;
+
+  const segmentLength = haversineMeters(segment.start, segment.next);
+  if (!Number.isFinite(segmentLength) || segmentLength <= 0) return fallbackPoint;
+
+  const safeDistance = Number.isFinite(depthMeters) ? Math.max(0, depthMeters) : ALLEY_OFFSET_METERS;
+  const ratio = Math.min(1, safeDistance / segmentLength);
+  return {
+    lat: segment.start.lat + (segment.next.lat - segment.start.lat) * ratio,
+    lng: segment.start.lng + (segment.next.lng - segment.start.lng) * ratio,
+  };
+}
+
+/**
+ * Batch search phase: Execute all hierarchical layer queries in parallel.
+ * OPTIMIZATION: Promise.all to minimize RTT (Round Trip Time).
+ */
+async function parallelSearchPhase(hierarchicalQueries, center, mapContext) {
+  const searchBatches = hierarchicalQueries.map(async (queryLayer) => {
+    const foundNodeSlashCount = extractSlashCount(queryLayer);
+    const peelDepthMeters = Math.max(0, (extractSlashCount(hierarchicalQueries[0]) - foundNodeSlashCount) * ALLEY_OFFSET_METERS);
+
+    // Parallel Photon and Nominatim calls for THIS LAYER
+    const [photonResults, nominatimResults] = await Promise.all([
+      searchPhoton(queryLayer, center, 8).catch(() => []),
+      searchNominatim(queryLayer, {
+        limit: 8,
+        countryCode: "vn",
+        bounds: mapContext?.bounds,
+      }).catch(() => []),
+    ]);
+
+    return {
+      queryLayer,
+      peelDepthMeters,
+      photonResults,
+      nominatimResults,
+      mergedResults: [...photonResults, ...nominatimResults],
+    };
+  });
+
+  const results = await Promise.all(searchBatches);
+  
+  // Apply global API delay after batch completion
+  if (results.length > 0) await sleep(API_CALL_DELAY_MS);
+  
+  return results;
+}
+
 export async function resolveLocation(inputValue, mapContext) {
   const raw = (inputValue || "").trim();
   if (!raw) return null;
 
+  // CACHE CHECK: Return cached result if exact match exists
+  const cacheKey = `${normalize(raw)}|${mapContext?.center?.lat.toFixed(4)}|${mapContext?.center?.lng.toFixed(4)}`;
+  const cachedResult = locationResultCache.get(cacheKey);
+  if (cachedResult) {
+    return cachedResult;
+  }
+
+  // Coordinate validation (strict: requires decimal point)
   const parsed = extractCoordinates(raw);
   if (parsed) {
-    return {
+    const result = {
       ...parsed,
       label: raw,
       provider: "manual",
@@ -912,8 +1022,11 @@ export async function resolveLocation(inputValue, mapContext) {
       isImprecise: false,
       markerTone: "default",
     };
+    locationResultCache.set(cacheKey, result);
+    return result;
   }
 
+  // Pre-normalize context to avoid repetitive calls in loops
   const center = mapContext?.center || null;
   const district = extractAreaAnchor(raw) || extractAreaHint(raw);
   const targetHouseNumber = extractQueryHouseNumber(raw);
@@ -922,50 +1035,33 @@ export async function resolveLocation(inputValue, mapContext) {
   const hierarchicalQueries = buildHierarchicalQueries(raw);
   const usesHierarchicalFlow = hierarchicalQueries.length > 1;
   const alleyMeta = extractAlleyMeta(raw);
+
+  // SEARCH PHASE (I/O): Parallel batch API calls for all hierarchical layers
+  const layerSearchResults = await parallelSearchPhase(hierarchicalQueries, center, mapContext);
+
+  // SCORING PHASE (CPU): Iterate through results and apply heuristics
+  // Collect all results for fuzzy fallback while checking for exact matches
   const allCollectedResults = [];
 
-  // Recursive fallback strategy: walk from most specific to broadest decomposition layer.
-  for (const queryLayer of hierarchicalQueries) {
-    const foundNodeSlashCount = extractSlashCount(queryLayer);
-    const peelDepthMeters = Math.max(0, (originalSlashCount - foundNodeSlashCount) * ALLEY_OFFSET_METERS);
+  for (const layerResult of layerSearchResults) {
+    const { queryLayer, peelDepthMeters, mergedResults } = layerResult;
+    
+    allCollectedResults.push(...mergedResults);
 
-    let photonResults = [];
-    try {
-      photonResults = await searchPhoton(queryLayer, center, 8);
-    } catch {
-      photonResults = [];
-    }
-    allCollectedResults.push(...photonResults);
-    await sleep(API_CALL_DELAY_MS);
-
-    const nominatimQuery = queryLayer;
-    let nominatimResults = [];
-    try {
-      nominatimResults = await searchNominatim(nominatimQuery, {
-        limit: 8,
-        countryCode: "vn",
-        bounds: mapContext?.bounds,
-      });
-    } catch {
-      nominatimResults = [];
-    }
-    allCollectedResults.push(...nominatimResults);
-    await sleep(API_CALL_DELAY_MS);
-
-    const mergedResults = [...photonResults, ...nominatimResults];
     if (mergedResults.length === 0) {
-      // Peel-and-search constraint: broaden to parent layer first, no fuzzy fallback here.
+      // Peel-and-search constraint: No results at this layer, continue to parent
       continue;
     }
 
+    // Attempt 1: Exact match (slash or alley token)
     const exactMatch = findExactHouseMatch(mergedResults, queryLayer);
     if (exactMatch) {
       const exactBasePoint = mapToLatLng(exactMatch) || { lat: exactMatch.lat, lng: exactMatch.lng };
       const exactPoint = peelDepthMeters > 0
-        ? pointIntoAlley(exactMatch, exactBasePoint, peelDepthMeters)
+        ? computeAlleyOffsetResult(exactMatch, exactBasePoint, peelDepthMeters)
         : exactBasePoint;
 
-      return {
+      const result = {
         lat: exactPoint.lat,
         lng: exactPoint.lng,
         label: [exactMatch.houseNumber, exactMatch.street, exactMatch.district || exactMatch.city]
@@ -982,8 +1078,11 @@ export async function resolveLocation(inputValue, mapContext) {
         markerTone: "default",
         method: usesHierarchicalFlow ? "PHOTON (HIERARCHICAL)" : "PHOTON (EXACT)",
       };
+      locationResultCache.set(cacheKey, result);
+      return result;
     }
 
+    // Attempt 2: Interpolation (for numeric addresses without exact match)
     if (Number.isFinite(targetHouseNumber)) {
       const interpolationAttempt = await buildInterpolationCandidate(
         queryLayer,
@@ -993,39 +1092,53 @@ export async function resolveLocation(inputValue, mapContext) {
         mergedResults
       );
       if (interpolationAttempt) {
+        locationResultCache.set(cacheKey, interpolationAttempt);
         return interpolationAttempt;
       }
     }
 
+    // Attempt 3: Alley-aware resolution (Vietnamese "ngõ" addresses)
     const normalizedLayer = normalize(queryLayer);
-    if (alleyMeta && normalizedLayer.includes(`ngo ${alleyMeta.alleyNumber}`)) {
+    if (alleyMeta && (normalizedLayer.includes(`ngo ${alleyMeta.alleyNumber}`) || normalizedLayer.includes(`ngo${alleyMeta.alleyNumber}`))) {
       const depthDistance = peelDepthMeters > 0 ? peelDepthMeters : ALLEY_OFFSET_METERS;
       const alleyOffset = buildAlleyOffsetCandidate(mergedResults, alleyMeta, district, raw, depthDistance);
       if (alleyOffset) {
+        locationResultCache.set(cacheKey, alleyOffset);
         return alleyOffset;
       }
     }
   }
+  // Suggested safety filter for the fallback
+  const localizedResults = allCollectedResults.filter(item => 
+    !district || areaMatchesAnchor(item, district)
+  );
+  // FALLBACK: Fuzzy best-guess from all collected results
+ const bestGuess = findBestMatch(
+    localizedResults.length > 0 ? localizedResults : allCollectedResults, 
+    raw, 
+    { expectedDistrict: district });
+  if (bestGuess) {
+    const result = {
+      lat: bestGuess.lat,
+      lng: bestGuess.lng,
+      label: bestGuess.label,
+      provider: "Best Guess (Fuzzy)",
+      matchType: "best-guess",
+      isInterpolated: false,
+      isFuzzy: true,
+      confidence: 0.5,
+      confidenceLabel: "FUZZY_GUESS",
+      needsVerification: true,
+      isImprecise: true,
+      markerTone: "grey",
+      snappedToPoi: bestGuess.snappedToPoi,
+      method: "GEOMATH (APPROXIMATE)",
+    };
+    locationResultCache.set(cacheKey, result);
+    return result;
+  }
 
-  const bestGuess = findBestMatch(allCollectedResults, raw, { expectedDistrict: district });
-  if (!bestGuess) return null;
-
-  return {
-    lat: bestGuess.lat,
-    lng: bestGuess.lng,
-    label: bestGuess.label,
-    provider: "Best Guess (Fuzzy)",
-    matchType: "best-guess",
-    isInterpolated: false,
-    isFuzzy: true,
-    confidence: 0.5,
-    confidenceLabel: "FUZZY_GUESS",
-    needsVerification: true,
-    isImprecise: true,
-    markerTone: "grey",
-    snappedToPoi: bestGuess.snappedToPoi,
-    method: "GEOMATH (APPROXIMATE)",
-  };
+  return null;
 }
 
 export async function getAutocompleteSuggestions(query, mapContext) {
