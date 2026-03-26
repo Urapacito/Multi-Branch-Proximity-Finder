@@ -47,14 +47,15 @@ function districtMatchesExpected(result, expectedDistrict) {
 
 function extractCoordinates(value) {
   const text = (value || "").trim();
-  const pair = text.match(/(-?\d+(?:\.\d+)?)\s*[,;|/]\s*(-?\d+(?:\.\d+)?)/);
+  // REQUIREMENT: Must have a dot (.) to be coordinates. 
+  // This ignores "56/1" but accepts "21.001, 105.802"
+  const pair = text.match(/(-?\d+\.\d+)\s*[,;|/]\s*(-?\d+\.\d+)/);
   if (!pair) return null;
 
   const lat = Number(pair[1]);
   const lng = Number(pair[2]);
-  if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+  
   if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
-
   return { lat, lng };
 }
 
@@ -167,6 +168,13 @@ function extractAreaHint(query) {
   return parts[1];
 }
 
+function extractAreaAnchor(query) {
+  const parts = String(query || "").split(",");
+  if (parts.length < 2) return null;
+  // Joins Ward, District, City into one normalized anchor string
+  return normalize(parts.slice(1).join(" "));
+}
+
 function dedupeStrings(values) {
   const seen = new Set();
   const output = [];
@@ -185,41 +193,49 @@ export function decomposeAddress(input) {
   const text = String(input || "").replace(/\s+/g, " ").trim();
   if (!text) return [];
 
-  const slashPattern = text.match(/\b\d+(?:\/\d+)+\b/);
-  if (slashPattern) {
-    const fullToken = slashPattern[0];
-    const parts = fullToken.split("/");
-    const stack = [];
-    for (let i = parts.length; i >= 1; i -= 1) {
-      stack.push(text.replace(fullToken, parts.slice(0, i).join("/")));
-    }
-    return dedupeStrings(stack);
+  const parts = text.split(",");
+  const head = parts[0].trim();
+  const tail = parts.slice(1).join(", ").trim();
+
+  // 1. Handle "House ngõ Alley" (e.g., 38 ngõ 231)
+  const ngoMatch = head.match(/^(\d+)\s+(?:ngo|ngõ)\s+(\d+)\b/i);
+  if (ngoMatch) {
+    const houseNum = ngoMatch[1];
+    const alleyNum = ngoMatch[2];
+    const fullToken = ngoMatch[0];
+
+    return dedupeStrings([
+      text, // Full: 38 ngõ 231 Tân Mai...
+      `${head.replace(fullToken, "ngõ " + alleyNum)}, ${tail}`, // Parent Alley: ngõ 231 Tân Mai...
+      `${head.replace(fullToken, houseNum)}, ${tail}` // Main Road: 38 Tân Mai...
+    ]);
   }
 
-  const alleyPattern = text.match(/\b(\d+)\s*(?:ngo|ngõ)\s*(\d+)\b/i);
-  if (alleyPattern) {
-    const houseNumber = alleyPattern[1];
-    const alleyNumber = alleyPattern[2];
-    const fullToken = alleyPattern[0];
-    const alleyOnly = text.replace(fullToken, `ngõ ${alleyNumber}`);
-    const houseOnly = text.replace(fullToken, houseNumber);
-    return dedupeStrings([text, alleyOnly, houseOnly]);
+  // 2. Handle Slashes (e.g., 56/1)
+  const slashMatch = head.match(/^(\d+(?:\/\d+)+)\b/);
+  if (slashMatch) {
+    const fullToken = slashMatch[1];
+    const segments = fullToken.split("/");
+    const stack = [];
+    for (let i = segments.length; i >= 1; i--) {
+      const currentNumber = segments.slice(0, i).join("/");
+      const newHead = head.replace(fullToken, currentNumber);
+      stack.push(tail ? `${newHead}, ${tail}` : newHead);
+    }
+    return dedupeStrings(stack);
   }
 
   return [text];
 }
 
 function buildHierarchicalQueries(input) {
-  const parts = String(input || "")
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const head = parts[0] || "";
-  const tail = parts.slice(1).join(", ");
-  const fragments = decomposeAddress(head);
+  return decomposeAddress(input);
+}
 
-  const rebuilt = fragments.map((fragment) => (tail ? `${fragment}, ${tail}` : fragment));
-  return dedupeStrings(rebuilt);
+function extractSlashCount(value) {
+  const token = String(value || "").match(/\b\d+(?:\/\d+)*\b/)?.[0] || "";
+  if (!token.includes("/")) return 0;
+  return token.split("/").length - 1;
 }
 
 function extractAlleyMeta(input) {
@@ -349,10 +365,10 @@ function haversineMeters(a, b) {
   return 2 * earthRadiusMeters * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-function pointIntoAlley(item, fallbackPoint) {
+function pointIntoAlley(item, fallbackPoint, distanceMeters = ALLEY_OFFSET_METERS) {
   const pathPoints = extractGeometryPath(item);
   if (pathPoints.length >= 2) {
-    const followed = GeoMath.followPathDistance(pathPoints, ALLEY_OFFSET_METERS);
+    const followed = GeoMath.followPathDistance(pathPoints, distanceMeters);
     if (followed) return followed;
   }
 
@@ -362,14 +378,15 @@ function pointIntoAlley(item, fallbackPoint) {
   const segmentLength = haversineMeters(segment.start, segment.next);
   if (!Number.isFinite(segmentLength) || segmentLength <= 0) return fallbackPoint;
 
-  const ratio = Math.min(1, ALLEY_OFFSET_METERS / segmentLength);
+  const safeDistance = Number.isFinite(distanceMeters) ? Math.max(0, distanceMeters) : ALLEY_OFFSET_METERS;
+  const ratio = Math.min(1, safeDistance / segmentLength);
   return {
     lat: segment.start.lat + (segment.next.lat - segment.start.lat) * ratio,
     lng: segment.start.lng + (segment.next.lng - segment.start.lng) * ratio,
   };
 }
 
-function buildAlleyOffsetCandidate(results, alleyMeta, expectedDistrict, rawQuery) {
+function buildAlleyOffsetCandidate(results, alleyMeta, expectedDistrict, rawQuery, distanceMeters = ALLEY_OFFSET_METERS) {
   if (!alleyMeta) return null;
 
   const alleyToken = `ngo ${alleyMeta.alleyNumber}`;
@@ -394,7 +411,7 @@ function buildAlleyOffsetCandidate(results, alleyMeta, expectedDistrict, rawQuer
   const alleyBasePoint = mapToLatLng(alleyResult);
   if (!alleyBasePoint) return null;
 
-  const offsetPoint = pointIntoAlley(alleyResult, alleyBasePoint);
+  const offsetPoint = pointIntoAlley(alleyResult, alleyBasePoint, distanceMeters);
   return {
     lat: offsetPoint.lat,
     lng: offsetPoint.lng,
@@ -416,49 +433,49 @@ function buildAlleyOffsetCandidate(results, alleyMeta, expectedDistrict, rawQuer
   };
 }
 
+function areaMatchesAnchor(result, anchor) {
+  if (!anchor) return true;
+
+  const resultText = normalize([
+    result.ward,
+    result.district,
+    result.city,
+    result.suburb,
+    result.city_district,
+    result.town,
+    result.village,
+    result.address
+  ].filter(Boolean).join(" "));
+
+  // Return true if the result overlaps with your Ward/City anchor
+  return resultText.includes(anchor) || anchor.includes(resultText);
+}
+
 function findExactHouseMatch(results, query) {
-  const slashToken = String(query || "").match(/\b\d+(?:\/\d+)+\b/)?.[0] || null;
-  if (slashToken) {
-    const expectedDistrict = pickDistrictFromQuery(query) || extractAreaHint(query);
-    const slashNeedle = normalize(slashToken);
-    for (const item of results) {
-      const haystack = normalize([
-        item?.houseNumber,
-        item?.name,
-        item?.street,
-        item?.address,
-        item?.raw?.properties?.name,
-      ]
-        .filter(Boolean)
-        .join(" "));
+  // Extract either a slash token (56/1) OR a "ngõ" token (38 ngõ 231)
+  const slashToken = query.match(/\b\d+(?:\/\d+)+\b/)?.[0];
+  const ngoToken = query.match(/\b\d+\s+(?:ngo|ngõ)\s+\d+\b/i)?.[0];
+  const needle = normalize(slashToken || ngoToken || "");
+  
+  if (!needle) return null;
 
-      if (!haystack.includes(slashNeedle)) continue;
-      if (expectedDistrict && !districtMatchesExpected(item, expectedDistrict)) continue;
-      return item;
-    }
+  const anchor = extractAreaAnchor(query);
 
-    return null;
-  }
-
-  const targetHouse = extractQueryHouseNumber(query);
-  if (!targetHouse) return null;
-
-  // Numeric-only inputs (e.g. "91") should use proximity anchor interpolation flow.
-  if (!extractStreetFragment(query)) return null;
-
-  const queryTokens = toTokens(query);
-  const expectedDistrict = pickDistrictFromQuery(query) || extractAreaHint(query);
   for (const item of results) {
-    const itemHouse = extractHouseNumber(item);
-    if (!itemHouse) continue;
-    if (itemHouse !== targetHouse) continue;
-    if (expectedDistrict && !districtMatchesExpected(item, expectedDistrict)) continue;
+    const haystack = normalize([
+      item?.houseNumber,
+      item?.name,
+      item?.street,
+      item?.address,
+      item?.raw?.properties?.name
+    ].filter(Boolean).join(" "));
 
-    if (scoreStreetMatch(item, queryTokens) > 0 || queryTokens.length <= 1) {
-      return item;
-    }
+    // Check if the result contains the house/alley combo
+    if (!haystack.includes(needle)) continue;
+    if (anchor && !areaMatchesAnchor(item, anchor)) continue;
+
+    return item;
   }
-
   return null;
 }
 
@@ -492,12 +509,17 @@ async function fetchPhotonQueryWithCache(query, expectedDistrict, mapContext) {
 }
 
 async function searchAnchorQueryWithBroadRetry(targetNum, streetFragment, districtLabel, expectedDistrict, mapContext) {
-  const specificQuery = `${targetNum} ${streetFragment}, ${districtLabel}, Hanoi, Vietnam`;
+  const specificQuery = districtLabel
+    ? `${targetNum} ${streetFragment}, ${districtLabel}`
+    : `${targetNum} ${streetFragment}`;
   const specific = await fetchPhotonQueryWithCache(specificQuery, expectedDistrict, mapContext);
   if (specific.length > 0) return specific;
 
-  const broadQuery = `${targetNum} ${streetFragment}, Hanoi`;
-  return fetchPhotonQueryWithCache(broadQuery, expectedDistrict, mapContext);
+  if (districtLabel) {
+    const broadQuery = `${targetNum} ${streetFragment}`;
+    return fetchPhotonQueryWithCache(broadQuery, expectedDistrict, mapContext);
+  }
+  return specific;
 }
 
 // Strict result filtering: exclude alleys, prioritize primary house type matches.
@@ -585,11 +607,13 @@ async function buildInterpolationCandidate(query, targetHouse, expectedDistrict,
     return null;
   }
 
-  const districtLabel = expectedDistrict || "Ha Dong";
+  const districtLabel = expectedDistrict || "";
   const startedAt = Date.now();
 
   // Initial exact target lookup in Photon-first flow.
-  const exactQuery = `${targetHouse} ${streetFragment}, ${districtLabel}, Hanoi, Vietnam`;
+  const exactQuery = districtLabel
+    ? `${targetHouse} ${streetFragment}, ${districtLabel}`
+    : `${targetHouse} ${streetFragment}`;
   const exactResults = await fetchPhotonQueryWithCache(exactQuery, expectedDistrict, mapContext);
   const exactAnchor = pickValidAnchor(exactResults, targetHouse, streetFragment, expectedDistrict);
   if (exactAnchor) {
@@ -818,29 +842,40 @@ export function findBestMatch(results, inputQuery, options = {}) {
 
   const queryTokens = toTokens(inputQuery);
   const targetHouseNumber = extractQueryHouseNumber(inputQuery);
-  const expectedDistrict = options.expectedDistrict || null;
+  
+  // FIX: Use provided district OR extract from the query string (the Ward/Commune)
+  const anchor = options.expectedDistrict || extractAreaAnchor(inputQuery);
+  
   let best = null;
   let bestScore = -Infinity;
 
   for (const item of results) {
-    const districtMatch = districtMatchesExpected(item, expectedDistrict);
+    // Check if result matches our Ward/City anchor
+    const isAreaMatch = areaMatchesAnchor(item, anchor);
+    
     let score = 0;
     score += scoreType(item);
     score += scoreStreetMatch(item, queryTokens);
     score += scoreDistrictMatch(item, queryTokens);
     score += scoreHouseNumberMatch(item, queryTokens, targetHouseNumber);
 
-    if (expectedDistrict && districtMatch) score += 18;
-    if (expectedDistrict && !districtMatch) score -= 24;
+    // THE SAFETY VALVE: Prevents the marker from leaving the territory
+    if (anchor && !isAreaMatch) {
+      score -= 250; // Heavy nuclear penalty
+      continue;     // Skip this result entirely
+    }
+
+    if (anchor && isAreaMatch) {
+      score += 40; // Reward for staying in the correct area
+    }
 
     if (normalize(item.source) === "photon") score += 8;
     if (normalize(item.source) === "nominatim") score += 4;
-
     if (shouldSnapToPoi(item, queryTokens)) score += 25;
 
     if (score > bestScore) {
       bestScore = score;
-      best = { ...item, districtMatch };
+      best = { ...item, districtMatch: isAreaMatch };
     }
   }
 
@@ -856,14 +891,6 @@ export function findBestMatch(results, inputQuery, options = {}) {
     snappedToPoi: shouldSnapToPoi(best, queryTokens),
     districtMatch: best.districtMatch,
   };
-}
-
-function pickDistrictFromQuery(query) {
-  const normalized = normalize(query);
-  if (normalized.includes("ha dong") || normalized.includes("hadong")) return "Ha Dong";
-  if (normalized.includes("cau giay")) return "Cau Giay";
-  if (normalized.includes("dong da")) return "Dong Da";
-  return null;
 }
 
 export async function resolveLocation(inputValue, mapContext) {
@@ -888,9 +915,9 @@ export async function resolveLocation(inputValue, mapContext) {
   }
 
   const center = mapContext?.center || null;
-  const district = pickDistrictFromQuery(raw) || extractAreaHint(raw);
+  const district = extractAreaAnchor(raw) || extractAreaHint(raw);
   const targetHouseNumber = extractQueryHouseNumber(raw);
-  const districtLabel = district || "Ha Dong";
+  const originalSlashCount = extractSlashCount(raw);
 
   const hierarchicalQueries = buildHierarchicalQueries(raw);
   const usesHierarchicalFlow = hierarchicalQueries.length > 1;
@@ -899,6 +926,9 @@ export async function resolveLocation(inputValue, mapContext) {
 
   // Recursive fallback strategy: walk from most specific to broadest decomposition layer.
   for (const queryLayer of hierarchicalQueries) {
+    const foundNodeSlashCount = extractSlashCount(queryLayer);
+    const peelDepthMeters = Math.max(0, (originalSlashCount - foundNodeSlashCount) * ALLEY_OFFSET_METERS);
+
     let photonResults = [];
     try {
       photonResults = await searchPhoton(queryLayer, center, 8);
@@ -908,7 +938,7 @@ export async function resolveLocation(inputValue, mapContext) {
     allCollectedResults.push(...photonResults);
     await sleep(API_CALL_DELAY_MS);
 
-    const nominatimQuery = `${queryLayer}, ${districtLabel}, Hanoi, Vietnam`;
+    const nominatimQuery = queryLayer;
     let nominatimResults = [];
     try {
       nominatimResults = await searchNominatim(nominatimQuery, {
@@ -923,12 +953,21 @@ export async function resolveLocation(inputValue, mapContext) {
     await sleep(API_CALL_DELAY_MS);
 
     const mergedResults = [...photonResults, ...nominatimResults];
+    if (mergedResults.length === 0) {
+      // Peel-and-search constraint: broaden to parent layer first, no fuzzy fallback here.
+      continue;
+    }
 
     const exactMatch = findExactHouseMatch(mergedResults, queryLayer);
     if (exactMatch) {
+      const exactBasePoint = mapToLatLng(exactMatch) || { lat: exactMatch.lat, lng: exactMatch.lng };
+      const exactPoint = peelDepthMeters > 0
+        ? pointIntoAlley(exactMatch, exactBasePoint, peelDepthMeters)
+        : exactBasePoint;
+
       return {
-        lat: exactMatch.lat,
-        lng: exactMatch.lng,
+        lat: exactPoint.lat,
+        lng: exactPoint.lng,
         label: [exactMatch.houseNumber, exactMatch.street, exactMatch.district || exactMatch.city]
           .filter(Boolean)
           .join(" ")
@@ -960,7 +999,8 @@ export async function resolveLocation(inputValue, mapContext) {
 
     const normalizedLayer = normalize(queryLayer);
     if (alleyMeta && normalizedLayer.includes(`ngo ${alleyMeta.alleyNumber}`)) {
-      const alleyOffset = buildAlleyOffsetCandidate(mergedResults, alleyMeta, district, raw);
+      const depthDistance = peelDepthMeters > 0 ? peelDepthMeters : ALLEY_OFFSET_METERS;
+      const alleyOffset = buildAlleyOffsetCandidate(mergedResults, alleyMeta, district, raw, depthDistance);
       if (alleyOffset) {
         return alleyOffset;
       }
