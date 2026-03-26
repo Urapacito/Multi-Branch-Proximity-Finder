@@ -50,7 +50,7 @@ Key modules:
 
 - `js/services/modules/addressUtils.js` (Parsing & Normalization):
   - Vietnamese diacritical normalization (đ → d).
-  - Hierarchical address decomposition (slash notation: `56/1/2`, alley notation: `38 ngõ 231`).
+  - Hierarchical address decomposition (slash notation: `56/1/2`, alley notation: `38 Alley 231`).
   - Cache key generation with 4-decimal coordinate precision.
   - Area anchor extraction for territory-bounded searches.
 
