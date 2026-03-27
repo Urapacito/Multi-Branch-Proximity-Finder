@@ -1,4 +1,4 @@
-import { fetchOsrmRoute as routeBetween, searchNominatim, searchPhoton } from "../repositories/geoRepository.js";
+import { fetchOsrmRoute as routeBetweenRaw, searchNominatim, searchPhoton } from "../repositories/geoRepository.js";
 import * as Parser from "./modules/addressUtils.js";
 import * as Scorer from "./modules/scoringEngine.js";
 import * as Interpolator from "./modules/interpolationService.js";
@@ -12,17 +12,22 @@ function sleep(ms) {
 }
 
 async function parallelSearchPhase(hierarchicalQueries, center, mapContext) {
-  const batches = hierarchicalQueries.map(async (queryLayer) => {
+  // 1. Create a "Search Batch" for every address layer simultaneously
+  const batchPromises = hierarchicalQueries.map(async (queryLayer, index) => {
     const foundSlash = Parser.extractSlashCount(queryLayer);
     const rootSlash = Parser.extractSlashCount(hierarchicalQueries[0]);
+    
+    // Calculate how "deep" we are based on how many slashes were removed
     const peelDepthMeters = Math.max(0, (rootSlash - foundSlash) * ALLEY_OFFSET_METERS);
 
+    // 2. Perform Racing Searches for each layer
+    // searchPhoton now races .io and .de mirrors internally
     const [photonResults, nominatimResults] = await Promise.all([
       searchPhoton(queryLayer, center, 8).catch(() => []),
       searchNominatim(queryLayer, {
         limit: 8,
         countryCode: "vn",
-        bounds: mapContext?.bounds,
+        viewbox: mapContext?.bounds, // Use viewbox for Nominatim bias
       }).catch(() => []),
     ]);
 
@@ -33,8 +38,13 @@ async function parallelSearchPhase(hierarchicalQueries, center, mapContext) {
     };
   });
 
-  const results = await Promise.all(batches);
-  if (results.length > 0) await sleep(API_CALL_DELAY_MS);
+  // 3. Wait for all layers to return (The "Race of Races")
+  const results = await Promise.all(batchPromises);
+
+  // OPTIONAL: Only sleep if worried about hitting rate limits 
+  // on Nominatim. If Photon is your primary, you can remove this.
+  // if (results.length > 0) await sleep(API_CALL_DELAY_MS);
+
   return results;
 }
 
@@ -164,4 +174,28 @@ export async function getAutocompleteSuggestions(query, mapContext) {
   }));
 }
 
-export { routeBetween };
+export async function routeBetween(origin, destination, options = {}) {
+  try {
+    // 1. Call the racing repository function
+    const data = await routeBetweenRaw([origin, destination], null, options);
+
+    if (!data?.routes || data.routes.length === 0) {
+      return null;
+    }
+
+    const primary = data.routes[0];
+
+    // 2. Return the structure main.js expects
+    return {
+      geometry: primary.geometry, // This is the GeoJSON for the blue line
+      distanceKm: primary.distance / 1000, // OSRM is in meters
+      durationMin: primary.duration / 60,   // OSRM is in seconds
+      weight: primary.weight,
+      method: primary.method || (primary.isFerryFallback ? "FERRY_FALLBACK" : "OSRM"),
+      isFerryFallback: Boolean(primary.isFerryFallback || data.isFerryFallback),
+    };
+  } catch (error) {
+    console.error("Routing calculation failed:", error);
+    return null;
+  }
+}

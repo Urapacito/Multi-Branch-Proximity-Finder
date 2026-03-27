@@ -29,7 +29,19 @@
 
       <section class="panel" aria-label="Origin and destination inputs">
         <div class="sticky-origin-controls">
-          <label for="originInput">Origin</label>
+          <div class="origin-header-row">
+            <label for="originInput">Origin</label>
+            <div class="route-mode-selector" role="group" aria-label="Select vehicle mode">
+              <button id="modeDrivingBtn" type="button" class="mode-btn is-active" data-route-mode="driving" aria-pressed="true">
+                <i class="fa-solid fa-car-side" aria-hidden="true"></i>
+                Driving
+              </button>
+              <button id="modeMotorcycleBtn" type="button" class="mode-btn" data-route-mode="motorcycle" aria-pressed="false">
+                <i class="fa-solid fa-motorcycle" aria-hidden="true"></i>
+                Motorcycle
+              </button>
+            </div>
+          </div>
           <div class="autocomplete-wrap">
             <input
               id="originInput"

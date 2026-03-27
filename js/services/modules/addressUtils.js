@@ -45,8 +45,10 @@ export function dedupeStrings(values) {
   const output = [];
 
   for (const value of values || []) {
+    // Normalization: " ngõ  231 " -> "ngõ 231"
     const normalizedValue = String(value || "").replace(/\s+/g, " ").trim();
     if (!normalizedValue || seen.has(normalizedValue)) continue;
+    
     seen.add(normalizedValue);
     output.push(normalizedValue);
   }
@@ -195,50 +197,48 @@ export function extractAreaAnchor(query) {
   return normalize(parts.slice(1).join(" "));
 }
 
-/**
- * Decompose Vietnamese address into hierarchical search stack
- * Handles both "House ngõ Alley" format and "House/Sub/Sub" format
- * Preserves road and ward context through the entire stack
- */
 export function decomposeAddress(input) {
   const text = String(input || "").replace(/\s+/g, " ").trim();
   if (!text) return [];
 
-  const parts = text.split(",");
-  const head = parts[0].trim();
+  const parts = text.split(",").map(p => p.trim());
+  const head = parts[0];
   const tail = parts.slice(1).join(", ").trim();
+  
+  let candidates = [text];
 
-  // 1. Handle Vietnamese alley notation: "House ngõ Alley" (e.g., 38 ngõ 231)
+  // 1. Vietnamese Alley logic
   const ngoMatch = head.match(/^(\d+)\s+(?:ngo|ngõ)\s+(\d+)\b/i);
   if (ngoMatch) {
     const houseNum = ngoMatch[1];
     const alleyNum = ngoMatch[2];
     const fullToken = ngoMatch[0];
-
-    return dedupeStrings([
-      text, // Full: 38 ngõ 231 Tân Mai...
-      `${head.replace(fullToken, "ngõ " + alleyNum)}, ${tail}`, // Parent Alley: ngõ 231 Tân Mai...
-      `${head.replace(fullToken, houseNum)}, ${tail}` // Main Road: 38 Tân Mai...
-    ]);
+    candidates.push(
+      `${head.replace(fullToken, "ngõ " + alleyNum)}, ${tail}`,
+      `${head.replace(fullToken, houseNum)}, ${tail}`
+    );
   }
 
-  // 2. Handle hierarchical slash notation: "House/Sub/Sub" (e.g., 56/1/2)
+  // 2. Hierarchical Slash logic (56/1/2 -> 56/1 -> 56)
   const slashMatch = head.match(/^(\d+(?:\/\d+)+)\b/);
   if (slashMatch) {
     const fullToken = slashMatch[1];
     const segments = fullToken.split("/");
-    const stack = [];
-    
-    // Build stack from most specific to broadest by peeling off trailing slashes
-    for (let i = segments.length; i >= 1; i--) {
+    for (let i = segments.length - 1; i >= 1; i--) {
       const currentNumber = segments.slice(0, i).join("/");
       const newHead = head.replace(fullToken, currentNumber);
-      stack.push(tail ? `${newHead}, ${tail}` : newHead);
+      candidates.push(tail ? `${newHead}, ${tail}` : newHead);
     }
-    return dedupeStrings(stack);
   }
 
-  return [text];
+  // 3. Last Resort: Street Only
+  const streetOnly = head.replace(/^[\d/]+\s*(?:ngo|ngõ)?\s*[\d/]*\s*/i, "").trim();
+  if (streetOnly && streetOnly !== head) {
+    candidates.push(tail ? `${streetOnly}, ${tail}` : streetOnly);
+  }
+
+  // Use the robust exported version here
+  return dedupeStrings(candidates);
 }
 
 /**

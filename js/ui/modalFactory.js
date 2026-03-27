@@ -43,7 +43,7 @@ export function createModalFactory(options = {}) {
     linkEl.href = "#";
     linkEl.addEventListener("click", (event) => event.preventDefault());
   }
-
+    
   function createWelcomeModalDom() {
     const wrapper = document.createElement("div");
     wrapper.innerHTML = `
@@ -166,7 +166,7 @@ export function createModalFactory(options = {}) {
               Uhhh, I know, this is hard problem in geocoding and routing when using something open-source data. I will try my best to optimize the engine to make it better.<br>
               But in the meantime, here are some tips to understand how the engine works and why it can be more reliable than "close enough" geocoding results:<br>
               - Try best to use PHOTON, it use database contributed by many people and have accuracy better than others. If your target location close to any location in PHOTON search, use that<br>
-              - Don't overcomplex the address, try to keep it with housenumber, street, ward and city/country. Thats all<br>
+              - Don't overcomplex the address, try to keep it with format "housenumber, street, ward and city/country". Thats all<br>
             </p>
             <p><strong>"I see location mark has different colors, what is that mean?"</strong><br> 
               - Well, as I mention above, locations not always exist in the map database, and when that happen, the engine will try to apply some logic to find the best guess location. <br>  
@@ -184,10 +184,14 @@ export function createModalFactory(options = {}) {
               "..."<br>
               <strong>"If it doesn't exist then make it so I make it"</strong>. It just more than draggable. By acting as a point, you now can use it to add stop in your route, and the engine will treat it as a verified point and apply logic to find best route through all points. Kinda suitable if you want to make plan or something.<br>
             </p>
+            <p><strong>"Wait wait, if there is draggable, can I change the specific branch route instead follow the calculate logic?"</strong><br>
+              "As I said, the draggable pin point here act as a verified shaping point so you can <strong>"assume"</strong> it was a stop point on that branch journey, 
+              it will mark from 1 to max pin number that you pinned into. So yes, you can absolutely re-shape the route by dragging the pin to the location you want, and the engine will calculate the route through that point. <br>
+            </p>
             <p><strong>"Can the web automatic detect my location right after I enter?"</strong><br>
               Tsk, literally just click "Use My Location" button.
             </p>
-            <p><strong>"The map render so slowly!"</strong><br>
+            <p><strong>"The map render so slowly! So does the search!"</strong><br>
               Ask your internet            
             </p>
             <p><strong>"Why some location calculate slower than others?"</strong><br>

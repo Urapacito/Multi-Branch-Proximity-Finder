@@ -8,10 +8,15 @@ const NOMINATIM_ENDPOINTS = [
   "https://nominatim.osm.ch/search",
 ];
 
-const OSRM_ENDPOINTS = [
-  "https://router.project-osrm.org/route/v1/driving",
-  "https://routing.openstreetmap.de/routed-car/route/v1/driving",
-];
+const OSRM_ENDPOINTS_BY_MODE = {
+  car: [
+    "https://routing.openstreetmap.de/routed-car/route/v1/driving",
+    "https://router.project-osrm.org/route/v1/driving",
+  ],
+  motorcycle: [
+    "https://routing.openstreetmap.de/routed-bike/route/v1/bicycle",
+  ],
+};
 
 const ROUTING_DOMAINS = ["project-osrm.org", "openstreetmap.de"];
 
@@ -44,87 +49,35 @@ function parseRetryAfterMs(value) {
   return 0;
 }
 
-async function fetchJsonWithFallback(urls, options = {}) {
-  let lastError = null;
-  const maxRetriesPerUrl = Number.isFinite(options.maxRetriesPerUrl) ? options.maxRetriesPerUrl : 1;
-
-  for (const url of urls) {
-    let isRoutingRequest = false;
+async function raceJsonFetch(urls, options = {}) {
+  const controllers = urls.map(() => new AbortController());
+  
+  const promises = urls.map(async (url, i) => {
     try {
-      const hostname = new URL(url).hostname.toLowerCase();
-      isRoutingRequest = ROUTING_DOMAINS.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
-    } catch {
-      isRoutingRequest = false;
+      const response = await fetch(url, {
+        ...options,
+        signal: controllers[i].signal
+      });
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      
+      // CRITICAL: Parse the data BEFORE aborting others
+      const data = await response.json();
+
+      // SUCCESS: Now it's safe to cancel the slow mirrors
+      controllers.forEach((ctrl, idx) => {
+        if (idx !== i) ctrl.abort();
+      });
+      
+      return data;
+    } catch (err) {
+      // Ignore abort errors in the console
+      if (err.name === 'AbortError') return new Promise(() => {}); 
+      throw err;
     }
+  });
 
-    const method = String(options.method || "GET").toUpperCase();
-
-    for (let attempt = 0; attempt <= maxRetriesPerUrl; attempt += 1) {
-      const timeout = withTimeout(options.timeoutMs || 12000);
-      try {
-        const headers = {
-          Accept: "application/json",
-          ...(options.userAgent ? { "User-Agent": options.userAgent } : {}),
-          ...options.headers,
-        };
-
-        if (!isRoutingRequest) {
-          // Keep project identity header for geocoding endpoints; strip for routing endpoints.
-          headers["X-GeoMath-Client"] = options.userAgent || "multi-branch-proximity-finder/1.0";
-        }
-
-        if (isRoutingRequest) {
-          for (const key of Object.keys(headers)) {
-            if (key.toLowerCase() === "x-geomath-client") {
-              delete headers[key];
-            }
-          }
-        }
-
-        const response = await fetch(url, {
-          method,
-          mode: "cors",
-          cache: "no-store",
-          referrerPolicy: "strict-origin-when-cross-origin",
-          headers,
-          signal: timeout.signal,
-        });
-
-        // OPTIONS 204 is part of CORS negotiation and should not be treated as a hard error.
-        if (response.status === 204 && method === "OPTIONS") {
-          return null;
-        }
-
-        if (response.status === 429) {
-          const retryAfterMs = parseRetryAfterMs(response.headers.get("Retry-After"));
-          if (attempt < maxRetriesPerUrl) {
-            await sleep(retryAfterMs || 1200);
-            continue;
-          }
-
-          throw new Error("Server Busy (429). Please retry in a moment.");
-        }
-
-        if (!response.ok) {
-          lastError = new Error(`${response.status} ${response.statusText}`);
-          break;
-        }
-
-        return await response.json();
-      } catch (error) {
-        lastError = error;
-
-        if (attempt < maxRetriesPerUrl) {
-          await sleep(600 * (attempt + 1));
-          continue;
-        }
-      } finally {
-        timeout.clear();
-      }
-    }
-  }
-
-  throw lastError || new Error("All endpoints failed.");
+  return Promise.any(promises);
 }
 
 function mapPhotonFeature(feature) {
@@ -231,17 +184,76 @@ function normalizeRoutePoints(inputPoints, maybeDestination) {
   return [normalizePoint(inputPoints), normalizePoint(maybeDestination)].filter(Boolean);
 }
 
-function buildOsrmUrls(points) {
-  const routeParams = "overview=full&geometries=geojson";
+function buildOsrmUrls(points, options = {}) {
+  const normalizedMode = options.mode === "motorcycle" ? "motorcycle" : (options.mode === "car" ? "car" : "car");
+  const endpoints = OSRM_ENDPOINTS_BY_MODE[normalizedMode] || OSRM_ENDPOINTS_BY_MODE.car;
+  const routeParams = new URLSearchParams({
+    overview: "full",
+    geometries: "geojson",
+    alternatives: "false",
+    steps: "false",
+  });
+
+  if (normalizedMode === "motorcycle") {
+    routeParams.set("continue_straight", "false");
+  }
+
   const coordinateString = points.map((point) => `${point.lng},${point.lat}`).join(";");
-  return OSRM_ENDPOINTS.map((base) => `${base}/${coordinateString}?${routeParams}`);
+  return endpoints.map((base) => `${base}/${coordinateString}?${routeParams.toString()}`);
+}
+
+function haversineMeters(a, b) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const earthRadiusMeters = 6371000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLng = Math.sin(dLng / 2);
+  const h = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+  return 2 * earthRadiusMeters * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function buildFerryFallbackRoute(points, mode = "driving") {
+  const coordinates = points.map((point) => [point.lng, point.lat]);
+  let distanceM = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    distanceM += haversineMeters(points[i - 1], points[i]);
+  }
+
+  // Conservative speed profile for mixed land + ferry transfer estimate.
+  const speedMps = mode === "motorcycle" ? 9.0 : 8.0;
+  const durationS = distanceM > 0 ? distanceM / speedMps : 0;
+
+  return {
+    routes: [
+      {
+        geometry: {
+          type: "LineString",
+          coordinates,
+        },
+        distance: distanceM,
+        duration: durationS,
+        weight: durationS,
+        isFerryFallback: true,
+        method: "FERRY_FALLBACK",
+      },
+    ],
+    code: "Ok",
+    isFerryFallback: true,
+  };
 }
 
 export async function searchPhoton(query, mapCenter, limit = 8) {
   const urls = buildPhotonUrls(query, mapCenter, limit);
-  const data = await fetchJsonWithFallback(urls);
-  const features = Array.isArray(data?.features) ? data.features : [];
-  return features.map(mapPhotonFeature).filter(Boolean);
+  try {
+    const data = await raceJsonFetch(urls, { method: "GET" });
+    const features = Array.isArray(data?.features) ? data.features : [];
+    return features.map(mapPhotonFeature).filter(Boolean);
+  } catch (error) {
+    return [];
+  }
 }
 
 export async function searchNominatim(query, options = {}) {
@@ -276,34 +288,34 @@ export async function searchNominatim(query, options = {}) {
   }
 }
 
-export async function fetchOsrmRoute(inputPoints, maybeDestination) {
+export async function fetchOsrmRoute(inputPoints, maybeDestination, options = {}) {
   const points = normalizeRoutePoints(inputPoints, maybeDestination);
+  
   if (points.length < 2) {
     throw new Error("ROUTING_INVALID_POINTS: At least 2 valid coordinates are required.");
   }
 
-  const urls = buildOsrmUrls(points);
+  const urls = buildOsrmUrls(points, options);
 
-  let data;
   try {
-    data = await fetchJsonWithFallback(urls, {
+    // We use the new raceJsonFetch we created for Photon!
+    // This fires requests to all OSRM mirrors simultaneously.
+    const data = await raceJsonFetch(urls, {
       method: "GET",
-      headers: {},
+      timeoutMs: 8000, // Routing can take a bit longer than geocoding
     });
+
+    const hasPrimary = Array.isArray(data?.routes) && data.routes.length > 0;
+    if (!hasPrimary && options.allowFerry !== false) {
+      return buildFerryFallbackRoute(points, options.mode || "driving");
+    }
+
+    return data;
   } catch (error) {
+    if (options.allowFerry !== false) {
+      return buildFerryFallbackRoute(points, options.mode || "driving");
+    }
     const reason = error?.message ? String(error.message) : "Unknown routing failure.";
     throw new Error(`ROUTING_REQUEST_FAILED: ${reason}`);
   }
-
-  if (!data || data.code !== "Ok" || !Array.isArray(data.routes) || data.routes.length === 0) {
-    const code = data?.code ? String(data.code) : "NoRoute";
-    throw new Error(`ROUTING_RESPONSE_INVALID: ${code}`);
-  }
-
-  const best = data.routes[0];
-  return {
-    geometry: best.geometry,
-    distanceKm: best.distance / 1000,
-    durationMin: best.duration / 60,
-  };
 }

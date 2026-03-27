@@ -75,6 +75,8 @@ Key modules:
 - `js/services/routeInteractionService.js`:
   - Waypoint lifecycle state management.
   - Route manipulation (insertion, removal, reordering).
+  - Mode-aware route fetching (`car` and `motorcycle`) with profile-specific endpoint selection.
+  - Island-safe fallback route generation when public road graph does not produce a drivable path.
 
 ### Layer 3: Presentation & Controllers
 
@@ -200,6 +202,7 @@ const result = await Interpolator.buildInterpolationCandidate(
 **Provider Switching:**
 - Photon → Nominatim: If Photon fails, automatically retry with Nominatim.
 - OSRM Primary ↔ Fallback: If primary OSRM endpoint times out, switch to secondary.
+- Car profile ↔ Motorcycle-friendly profile: route stack can select FOSSGIS `routed-car` for car mode and `routed-bike` (bicycle profile) as a practical proxy for motorcycle-friendly street coverage.
 
 **Rate-Limit Handling:**
 - Detect HTTP 429 response.
@@ -215,6 +218,29 @@ const result = await Interpolator.buildInterpolationCandidate(
 **API Delay Pacing:**
 - 400ms delay between batch geocoding requests.
 - Prevents provider rate-limit triggers during hierarchical searches.
+
+### 4. Multi-Profile Routing (Technical Analysis)
+
+The routing layer now supports explicit transport mode decisions:
+
+- **Car mode:** prioritizes road profile endpoints intended for standard driving logic.
+- **Motorcycle mode:** uses a bike-profile endpoint as a pragmatic fallback profile where moped/motorbike-specific public profiles are unavailable.
+
+Implementation notes:
+
+- Route mode is user-selected in UI state and injected into both full-route calculation and waypoint drag recalculation paths.
+- The mode is propagated through service boundaries (UI → orchestration → repository/service fetchers) to keep behavior deterministic.
+- Travel metrics (`distanceKm`, `durationMin`) are normalized after each fetch so the result list updates consistently regardless of upstream payload shape.
+
+### 5. Island Route Handling (Technical Analysis)
+
+Public routing backends may fail for island crossings when graph connectivity is incomplete or ferry semantics differ by profile.
+
+To keep operational continuity, the system includes a controlled fallback path:
+
+- If no route is returned from active endpoints, a fallback line geometry is synthesized between checkpoints.
+- Estimated duration is derived from conservative speed assumptions by selected mode.
+- Result metadata marks fallback method explicitly (for auditability and UI explainability).
 
 ---
 
@@ -352,6 +378,8 @@ Branch Routes uses a practical, logistics-oriented UI language:
 - Distance chips, method badges, and verification cues for fast decision-making.
 - Hover route tooltip for split-distance context (`from start` / `to destination`).
 - Favorite control stack with heart actions, naming modal, and saved-location dropdown for repeat operations.
+- Custom map layer button under zoom controls with thumbnail-based quick switch (including Terrain view).
+- Transport mode buttons (car/motorcycle) placed near Origin input for low-friction route profile switching.
 
 ## Installation
 
@@ -408,6 +436,8 @@ npm run dev
 - OSRM (primary and fallback)
   - `https://router.project-osrm.org/route/v1/driving`
   - `https://routing.openstreetmap.de/routed-car/route/v1/driving`
+- Motorcycle-friendly profile proxy (FOSSGIS bike profile)
+  - `https://routing.openstreetmap.de/routed-bike/route/v1/bicycle/`
 
 ### Provider Resilience Strategy
 

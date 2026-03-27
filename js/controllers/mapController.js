@@ -1,6 +1,6 @@
-import { fetchOsrmRoute } from "../repositories/geoRepository.js";
-import { createRouteInteractionService } from "../services/routeInteractionService.js";
+import { createRouteInteractionService, fetchRoute, flipCoords } from "../services/routeInteractionService.js";
 import { GeoMath } from "../services/geoMath.js";
+import { debounceByKey } from "../ui/debounceUtil.js";
 
 export function createMapController(options = {}) {
   const {
@@ -17,6 +17,8 @@ export function createMapController(options = {}) {
     onRouteHoverEnd,
     onRequestFavoriteName,
     onFavoriteSaved,
+    routeProxyUrl,
+    getRouteMode,
   } = options;
 
   const map = L.map(mapElementId, { zoomControl: true }).setView([initialView.lat, initialView.lng], initialView.zoom);
@@ -27,10 +29,168 @@ export function createMapController(options = {}) {
     pane.style.pointerEvents = "auto";
   }
 
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "&copy; OpenStreetMap contributors",
-  }).addTo(map);
+  const baseLayers = {
+    Streets: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors",
+    }),
+    Satellite: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 19,
+      attribution: "Tiles &copy; Esri",
+    }),
+    Light: L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+      maxZoom: 20,
+      attribution: "&copy; OpenStreetMap &copy; CARTO",
+    }),
+    Terrain: L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", {
+      maxZoom: 17,
+      attribution: "Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap",
+    }),
+  };
+
+  const layerCatalog = [
+    {
+      key: "Streets",
+      label: "Standard",
+      thumb: "https://tile.openstreetmap.org/13/6551/3165.png",
+    },
+    {
+      key: "Satellite",
+      label: "Satellite",
+      thumb: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/13/3165/6551",
+    },
+    {
+      key: "Light",
+      label: "Light",
+      thumb: "https://a.basemaps.cartocdn.com/light_all/13/6551/3165.png",
+    },
+    {
+      key: "Terrain",
+      label: "Terrain",
+      thumb: "https://a.tile.opentopomap.org/13/6551/3165.png",
+    },
+  ];
+
+  let activeBaseLayerKey = "Streets";
+  let layerPanelEl = null;
+  let layerPanelToggleBtn = null;
+
+  function applyBaseLayer(nextKey) {
+    const normalizedKey = baseLayers[nextKey] ? nextKey : "Streets";
+    if (normalizedKey === activeBaseLayerKey) return;
+
+    const current = baseLayers[activeBaseLayerKey];
+    if (current && map.hasLayer(current)) {
+      map.removeLayer(current);
+    }
+
+    const nextLayer = baseLayers[normalizedKey] || baseLayers.Streets;
+    nextLayer.addTo(map);
+    activeBaseLayerKey = normalizedKey;
+
+    if (!layerPanelEl) return;
+    const cards = layerPanelEl.querySelectorAll("[data-layer-key]");
+    cards.forEach((card) => {
+      const isActive = card.dataset.layerKey === activeBaseLayerKey;
+      card.classList.toggle("is-active", isActive);
+      card.setAttribute("aria-pressed", String(isActive));
+    });
+  }
+
+  function closeLayerPanel() {
+    if (!layerPanelEl) return;
+    layerPanelEl.classList.add("hidden");
+    layerPanelToggleBtn?.setAttribute("aria-expanded", "false");
+  }
+
+  function openLayerPanel() {
+    if (!layerPanelEl || !layerPanelToggleBtn) return;
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const btnRect = layerPanelToggleBtn.getBoundingClientRect();
+
+    const top = Math.max(8, btnRect.top - mapRect.top - 8);
+    const left = btnRect.right - mapRect.left + 10;
+
+    layerPanelEl.style.top = `${top}px`;
+    layerPanelEl.style.left = `${left}px`;
+    layerPanelEl.classList.remove("hidden");
+    layerPanelToggleBtn.setAttribute("aria-expanded", "true");
+  }
+
+  function toggleLayerPanel() {
+    if (!layerPanelEl) return;
+    if (layerPanelEl.classList.contains("hidden")) {
+      openLayerPanel();
+      return;
+    }
+    closeLayerPanel();
+  }
+
+  function ensureLayerPanel() {
+    if (layerPanelEl) return layerPanelEl;
+    const host = map.getContainer();
+
+    layerPanelEl = document.createElement("div");
+    layerPanelEl.className = "map-layer-panel hidden";
+    layerPanelEl.innerHTML = `
+      <div class="map-layer-panel-header">Map Layers</div>
+      <div class="map-layer-grid"></div>
+    `;
+
+    const grid = layerPanelEl.querySelector(".map-layer-grid");
+    layerCatalog.forEach((item) => {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "map-layer-card";
+      card.dataset.layerKey = item.key;
+      card.setAttribute("aria-pressed", String(item.key === activeBaseLayerKey));
+      card.innerHTML = `
+        <span class="thumb-wrap"><img src="${item.thumb}" alt="${item.label} layer preview" /></span>
+        <span class="layer-name">${item.label}</span>
+      `;
+      card.addEventListener("click", () => {
+        applyBaseLayer(item.key);
+      });
+      grid?.appendChild(card);
+    });
+
+    host.appendChild(layerPanelEl);
+    return layerPanelEl;
+  }
+
+  function mountLayerControl() {
+    const layerControl = L.control({ position: "topleft" });
+
+    layerControl.onAdd = () => {
+      const container = L.DomUtil.create("div", "leaflet-bar custom-layer-control");
+      const button = L.DomUtil.create("button", "custom-layer-toggle", container);
+      button.type = "button";
+      button.setAttribute("aria-label", "Open map layers");
+      button.setAttribute("aria-expanded", "false");
+      button.innerHTML = '<i class="fa-solid fa-layer-group" aria-hidden="true"></i>';
+
+      L.DomEvent.disableClickPropagation(container);
+      L.DomEvent.disableScrollPropagation(container);
+      L.DomEvent.on(button, "click", (event) => {
+        L.DomEvent.stop(event);
+        layerPanelToggleBtn = button;
+        ensureLayerPanel();
+        toggleLayerPanel();
+      });
+
+      layerPanelToggleBtn = button;
+      return container;
+    };
+
+    layerControl.addTo(map);
+  }
+
+  baseLayers.Streets.addTo(map);
+  mountLayerControl();
+  ensureLayerPanel();
+  applyBaseLayer(activeBaseLayerKey);
+
+  map.on("click", () => closeLayerPanel());
 
   let originMarker = null;
   const destinationMarkers = new Map();
@@ -40,6 +200,7 @@ export function createMapController(options = {}) {
   const routeWaypointsById = new Map();
   const routeInteraction = createRouteInteractionService();
   const routeHoverCleanup = new Map();
+  const routeRecalcTimers = new Map();
   let activeDestinationId = null;
 
   function formatDistance(valueM) {
@@ -128,6 +289,17 @@ export function createMapController(options = {}) {
     onRouteHoverEnd?.();
   }
 
+  function clearRouteRecalcTimer(destinationId) {
+    const timer = routeRecalcTimers.get(destinationId);
+    if (timer) clearTimeout(timer);
+    routeRecalcTimers.delete(destinationId);
+  }
+
+  function clearAllRouteRecalcTimers() {
+    routeRecalcTimers.forEach((timer) => clearTimeout(timer));
+    routeRecalcTimers.clear();
+  }
+
   function setWaypointDraggingCursor(isDragging) {
     if (!document?.body) return;
     document.body.classList.toggle("route-waypoint-dragging", Boolean(isDragging));
@@ -174,12 +346,26 @@ export function createMapController(options = {}) {
     return defaultRedIcon;
   }
 
-  function routeWaypointIcon() {
+  function routeWaypointIcon(index, isShaping = false) {
+    const safeIndex = Number.isFinite(index) ? Number(index) : -1;
+
+    if (isShaping || safeIndex < 0) {
+      return L.divIcon({
+        className: "route-waypoint-div-icon shaping-point",
+        html: "<span class=\"shaping-point-dot\"></span>",
+        iconSize: [12, 12],
+        iconAnchor: [6, 6],
+      });
+    }
+
+    const label = String(safeIndex + 1);
     return L.divIcon({
       className: "route-waypoint-div-icon",
-      html: '<span style="display:block;width:12px;height:12px;border-radius:50%;background:#ffffff;border:2px solid #1a73e8;box-shadow:0 0 0 2px rgba(26,115,232,0.3);"></span>',
-      iconSize: [12, 12],
-      iconAnchor: [6, 6],
+      html: `<div class="wp-marker-wrapper">
+              <span class="wp-number">${label}</span>
+            </div>`,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
     });
   }
 
@@ -188,6 +374,7 @@ export function createMapController(options = {}) {
       id: point?.id,
       lat: Number(point.lat),
       lng: Number(point.lng),
+      type: point?.type === "shaping" ? "shaping" : "via",
     };
   }
 
@@ -244,19 +431,22 @@ export function createMapController(options = {}) {
     return saved || { name: favoriteName, lat: coords.lat, lon: coords.lng };
   }
 
-  function setActiveRouteWaypoints(destinationId) {
+  function ensureRouteWaypoints(destinationId) {
     const existing = routeWaypointsById.get(destinationId) || [];
-    routeInteraction.setActiveRoute(destinationId, existing.map(cloneWaypoint));
+    routeInteraction.setWaypointsForRoute(destinationId, existing.map(cloneWaypoint));
   }
 
-  function persistActiveRouteWaypoints(destinationId) {
-    routeWaypointsById.set(destinationId, routeInteraction.getCustomWaypoints().map(cloneWaypoint));
+  function persistRouteWaypoints(destinationId) {
+    routeWaypointsById.set(destinationId, routeInteraction.getWaypointsForRoute(destinationId).map(cloneWaypoint));
   }
 
   function updateWaypointMarkerIndexes(destinationId) {
     const markers = routeWaypointMarkers.get(destinationId) || [];
     markers.forEach((marker, index) => {
       marker.__waypointIndex = index;
+      const isShaping = marker.__waypointType === "shaping";
+      marker.setIcon(routeWaypointIcon(index, isShaping));
+      marker.setZIndexOffset(1200);
     });
   }
 
@@ -281,37 +471,118 @@ export function createMapController(options = {}) {
     const destination = getDestinationCoords(destinationId);
     if (!origin || !destination) return;
 
-    const waypoints = routeInteraction.getCustomWaypoints();
+    const waypoints = routeInteraction.getWaypointsForRoute(destinationId);
     const latLngs = [origin, ...waypoints, destination].map((point) => [point.lat, point.lng]);
     line.setLatLngs(latLngs);
     interactionLine?.setLatLngs(latLngs);
   }
 
+  function replaceRouteLayers(destinationId, latLngs) {
+    const oldCleanup = routeHoverCleanup.get(destinationId);
+    oldCleanup?.();
+    routeHoverCleanup.delete(destinationId);
+
+    const oldLine = routeLayers.get(destinationId);
+    if (oldLine) map.removeLayer(oldLine);
+
+    const oldInteraction = routeInteractionLayers.get(destinationId);
+    if (oldInteraction) map.removeLayer(oldInteraction);
+
+    const line = L.polyline(latLngs, {
+      ...routeStyle("default"),
+      interactive: false,
+    }).addTo(map);
+
+    const interactionLine = L.polyline(latLngs, {
+      pane: "routeInteractionPane",
+      weight: 20,
+      opacity: 0,
+      className: "route-interaction-layer",
+    }).addTo(map);
+
+    interactionLine.on("mousedown", (event) => handleInitialClick(destinationId, event));
+    attachRouteHoverEvents(destinationId, interactionLine);
+
+    routeLayers.set(destinationId, line);
+    routeInteractionLayers.set(destinationId, interactionLine);
+  }
+
+  function scheduleRouteRecalculation(destinationId, delayMs = 260) {
+    debounceByKey(routeRecalcTimers, destinationId, () => {
+      routeRecalcTimers.delete(destinationId);
+      void recalculateRouteWithWaypoints(destinationId);
+    }, delayMs);
+  }
+
+  function normalizeOsrmRoutePayload(payload) {
+    if (!payload || typeof payload !== "object") return null;
+
+    // Normalized shape (already mapped by some callers).
+    if (payload?.geometry?.coordinates && Array.isArray(payload.geometry.coordinates)) {
+      const distanceKm = Number.isFinite(payload.distanceKm)
+        ? payload.distanceKm
+        : Number.isFinite(payload.distance)
+          ? payload.distance / 1000
+          : null;
+      const durationMin = Number.isFinite(payload.durationMin)
+        ? payload.durationMin
+        : Number.isFinite(payload.duration)
+          ? payload.duration / 60
+          : null;
+
+      return {
+        ...payload,
+        distanceKm,
+        durationMin,
+      };
+    }
+
+    // Raw OSRM shape.
+    const primary = Array.isArray(payload.routes) ? payload.routes[0] : null;
+    if (!primary?.geometry?.coordinates || !Array.isArray(primary.geometry.coordinates)) return null;
+
+    return {
+      ...primary,
+      geometry: primary.geometry,
+      distanceKm: Number.isFinite(primary.distance) ? primary.distance / 1000 : null,
+      durationMin: Number.isFinite(primary.duration) ? primary.duration / 60 : null,
+      raw: payload,
+    };
+  }
+
   async function recalculateRouteWithWaypoints(destinationId) {
     const line = routeLayers.get(destinationId);
-    const interactionLine = routeInteractionLayers.get(destinationId);
     if (!line) return;
 
     const origin = getOriginCoords();
     const destination = getDestinationCoords(destinationId);
     if (!origin || !destination) return;
 
-    const points = [origin, ...routeInteraction.getCustomWaypoints(), destination];
+    ensureRouteWaypoints(destinationId);
+    const branchWaypoints = routeInteraction.getWaypointsForRoute(destinationId);
+    const points = [origin, ...branchWaypoints, destination];
     if (points.length < 2) return;
 
     onRouteRecalculateStart?.(destinationId);
     try {
-      const route = await fetchOsrmRoute(points);
+      const payload = await fetchRoute(points, null, {
+        proxyUrl: routeProxyUrl,
+        timeoutMs: 12000,
+        mode: typeof getRouteMode === "function" ? getRouteMode() : "driving",
+        allowFerry: true,
+      });
+      const route = normalizeOsrmRoutePayload(payload);
       if (!route?.geometry?.coordinates) return;
 
-      const latLngs = route.geometry.coordinates.map((coord) => [coord[1], coord[0]]);
-      line.setLatLngs(latLngs);
-      interactionLine?.setLatLngs(latLngs);
+      const latLngs = flipCoords(route.geometry.coordinates);
+      if (latLngs.length < 2) return;
+      replaceRouteLayers(destinationId, latLngs);
+      applyRouteSelection(activeDestinationId);
 
-      persistActiveRouteWaypoints(destinationId);
+      persistRouteWaypoints(destinationId);
       onRouteUpdated?.(destinationId, {
         route,
-        waypoints: routeInteraction.getCustomWaypoints().map(cloneWaypoint),
+        waypoints: routeInteraction.getWaypointsForRoute(destinationId).map(cloneWaypoint),
       });
     } catch (error) {
       onRouteRecalculateError?.(destinationId, error);
@@ -327,9 +598,9 @@ export function createMapController(options = {}) {
       const markerId = marker.__waypointId;
       if (!markerId) return;
 
-      setActiveRouteWaypoints(destinationId);
-      routeInteraction.removeWaypoint(markerId);
-      persistActiveRouteWaypoints(destinationId);
+      ensureRouteWaypoints(destinationId);
+      routeInteraction.removeWaypoint(destinationId, markerId);
+      persistRouteWaypoints(destinationId);
 
       const markers = routeWaypointMarkers.get(destinationId) || [];
       const markerIndex = markers.findIndex((item) => item.__waypointId === markerId);
@@ -344,6 +615,7 @@ export function createMapController(options = {}) {
 
     marker.on("dragstart", () => {
       setWaypointDraggingCursor(true);
+      map.closePopup();
       onRouteHoverEnd?.(destinationId);
     });
 
@@ -351,20 +623,23 @@ export function createMapController(options = {}) {
       const index = marker.__waypointIndex;
       if (!Number.isInteger(index)) return;
 
-      setActiveRouteWaypoints(destinationId);
-      routeInteraction.updateWaypointAt(index, marker.getLatLng());
-      persistActiveRouteWaypoints(destinationId);
+      map.closePopup();
+      ensureRouteWaypoints(destinationId);
+      routeInteraction.updateWaypointAt(destinationId, index, marker.getLatLng());
+      persistRouteWaypoints(destinationId);
       updatePolylinePreview(destinationId);
+      scheduleRouteRecalculation(destinationId);
     });
 
     marker.on("dragend", async () => {
       setWaypointDraggingCursor(false);
+      map.closePopup();
       const index = marker.__waypointIndex;
       if (!Number.isInteger(index)) return;
 
-      setActiveRouteWaypoints(destinationId);
-      routeInteraction.updateWaypointAt(index, marker.getLatLng());
-      persistActiveRouteWaypoints(destinationId);
+      ensureRouteWaypoints(destinationId);
+      routeInteraction.updateWaypointAt(destinationId, index, marker.getLatLng());
+      persistRouteWaypoints(destinationId);
       await recalculateRouteWithWaypoints(destinationId);
     });
 
@@ -386,27 +661,71 @@ export function createMapController(options = {}) {
     });
 
     marker.on("mouseout", () => onRouteHoverEnd?.(destinationId));
-    marker.on("contextmenu", removeWaypointFromRoute);
-    marker.on("dblclick", removeWaypointFromRoute);
+    marker.on("contextmenu", (event) => {
+      L.DomEvent.stop(event);
+      L.DomEvent.preventDefault(event);
+      onRouteHoverEnd?.(destinationId);
+
+      const menu = L.DomUtil.create("div", "route-context-menu");
+      menu.style.display = "flex";
+      menu.style.flexDirection = "column";
+      menu.style.gap = "6px";
+
+      const deleteBtn = L.DomUtil.create("button", "menu-item delete", menu);
+      deleteBtn.type = "button";
+      deleteBtn.textContent = "Delete from route";
+
+      const shapingBtn = L.DomUtil.create("button", "menu-item shaping", menu);
+      shapingBtn.type = "button";
+      shapingBtn.textContent = marker.__waypointType === "shaping" ? "Set as via point" : "Set as shaping point";
+
+      L.DomEvent.disableClickPropagation(menu);
+      L.DomEvent.on(deleteBtn, "click", async (e) => {
+        L.DomEvent.stop(e);
+        map.closePopup();
+        await removeWaypointFromRoute(e);
+      });
+
+      L.DomEvent.on(shapingBtn, "click", (e) => {
+        L.DomEvent.stop(e);
+        ensureRouteWaypoints(destinationId);
+        const nextType = marker.__waypointType === "shaping" ? "via" : "shaping";
+        routeInteraction.setWaypointType(destinationId, marker.__waypointId, nextType);
+        persistRouteWaypoints(destinationId);
+        marker.__waypointType = nextType;
+        marker.setIcon(routeWaypointIcon(marker.__waypointIndex, nextType === "shaping"));
+        marker.setZIndexOffset(1200);
+        map.closePopup();
+      });
+
+      L.popup({ closeButton: false, className: "route-menu-popup" })
+        .setLatLng(event.latlng)
+        .setContent(menu)
+        .openOn(map);
+    });
   }
 
   function handleInitialClick(destinationId, event) {
     const line = routeInteractionLayers.get(destinationId) || routeLayers.get(destinationId);
     if (!line || !event?.latlng) return;
 
-    setActiveRouteWaypoints(destinationId);
-    const insertion = routeInteraction.insertWaypoint(event.latlng, line);
+    map.closePopup();
+
+    ensureRouteWaypoints(destinationId);
+    const insertion = routeInteraction.insertWaypoint(destinationId, event.latlng, line);
     if (!insertion.waypoint) return;
 
-    persistActiveRouteWaypoints(destinationId);
+    persistRouteWaypoints(destinationId);
 
     const marker = L.marker(event.latlng, {
       draggable: true,
-      icon: routeWaypointIcon(),
+      icon: routeWaypointIcon(insertion.index, insertion.waypoint?.type === "shaping"),
+      zIndexOffset: 1200,
     }).addTo(map);
 
     marker.__waypointIndex = insertion.index;
     marker.__waypointId = insertion.waypoint.id;
+    marker.__waypointType = insertion.waypoint?.type === "shaping" ? "shaping" : "via";
     attachWaypointMarkerEvents(destinationId, marker);
 
     const markers = routeWaypointMarkers.get(destinationId) || [];
@@ -515,6 +834,7 @@ export function createMapController(options = {}) {
   }
 
   function removeDestinationMarker(id) {
+    clearRouteRecalcTimer(id);
     const marker = destinationMarkers.get(id);
     if (marker) {
       map.removeLayer(marker);
@@ -535,6 +855,7 @@ export function createMapController(options = {}) {
 
     clearWaypointMarkers(id);
     routeWaypointsById.delete(id);
+    routeInteraction.clearWaypointsForRoute(id);
 
     const cleanup = routeHoverCleanup.get(id);
     cleanup?.();
@@ -543,10 +864,12 @@ export function createMapController(options = {}) {
   }
 
   function clearAllDestinationMarkers() {
+    clearAllRouteRecalcTimers();
     destinationMarkers.forEach((marker) => map.removeLayer(marker));
     destinationMarkers.clear();
     clearAllWaypointMarkers();
     routeWaypointsById.clear();
+    routeInteraction.clearAllRoutes();
   }
 
   function routeStyle(state) {
@@ -556,6 +879,7 @@ export function createMapController(options = {}) {
   }
 
   function drawRoutes(results) {
+    clearAllRouteRecalcTimers();
     clearRouteHoverSubscriptions();
     routeLayers.forEach((layer) => map.removeLayer(layer));
     routeInteractionLayers.forEach((layer) => map.removeLayer(layer));
@@ -563,39 +887,28 @@ export function createMapController(options = {}) {
     routeInteractionLayers.clear();
     clearAllWaypointMarkers();
     routeWaypointsById.clear();
-    routeInteraction.clearActiveRoute();
+    routeInteraction.clearAllRoutes();
 
     results.forEach((item) => {
       const coords = item.route?.geometry?.coordinates;
       if (!coords) return;
-      const latLngs = coords.map((c) => [c[1], c[0]]);
-      const line = L.polyline(latLngs, {
-        ...routeStyle("default"),
-        interactive: false,
-      }).addTo(map);
-
-      const interactionLine = L.polyline(latLngs, {
-        pane: "routeInteractionPane",
-        weight: 20,
-        opacity: 0,
-        className: "route-interaction-layer",
-      }).addTo(map);
-
-      interactionLine.on("mousedown", (event) => handleInitialClick(item.id, event));
-      attachRouteHoverEvents(item.id, interactionLine);
-
-      routeLayers.set(item.id, line);
-      routeInteractionLayers.set(item.id, interactionLine);
+      const latLngs = flipCoords(coords);
+      if (latLngs.length < 2) return;
+      replaceRouteLayers(item.id, latLngs);
 
       if (Array.isArray(item.waypoints) && item.waypoints.length > 0) {
         routeWaypointsById.set(item.id, item.waypoints.map(cloneWaypoint));
+        routeInteraction.setWaypointsForRoute(item.id, item.waypoints.map(cloneWaypoint));
 
         const waypointMarkers = item.waypoints.map((point) => {
+          const waypointType = point?.type === "shaping" ? "shaping" : "via";
           const marker = L.marker([point.lat, point.lng], {
             draggable: true,
-            icon: routeWaypointIcon(),
+            icon: routeWaypointIcon(Number.NaN, waypointType === "shaping"),
+            zIndexOffset: 1200,
           }).addTo(map);
           marker.__waypointId = point.id;
+          marker.__waypointType = waypointType;
           attachWaypointMarkerEvents(item.id, marker);
           return marker;
         });
@@ -648,6 +961,7 @@ export function createMapController(options = {}) {
   }
 
   function clearMap() {
+    clearAllRouteRecalcTimers();
     if (originMarker) {
       map.removeLayer(originMarker);
       originMarker = null;

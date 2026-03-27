@@ -18,6 +18,8 @@ export function createUiManager() {
   const pickOnMapBtn = document.getElementById("pickOnMapBtn");
   const calculateBtn = document.getElementById("calculateBtn");
   const clearBtn = document.getElementById("clearBtn");
+  const modeDrivingBtn = document.getElementById("modeDrivingBtn");
+  const modeMotorcycleBtn = document.getElementById("modeMotorcycleBtn");
   const statusText = document.getElementById("statusText");
   const statusMessage = document.getElementById("statusMessage");
   const loadingIndicator = document.getElementById("loadingIndicator");
@@ -29,6 +31,7 @@ export function createUiManager() {
   const mapElement = document.getElementById("map");
 
   let activeDestinationId = null;
+  let routeMode = "driving";
   const debounceTimers = new Map();
   let shareModalBindingsInitialized = false;
   let shareCopyResetTimer = null;
@@ -107,6 +110,31 @@ export function createUiManager() {
     });
   }
 
+  function setRouteMode(nextMode) {
+    routeMode = nextMode === "motorcycle" ? "motorcycle" : "driving";
+    const isDriving = routeMode === "driving";
+    modeDrivingBtn?.classList.toggle("is-active", isDriving);
+    modeMotorcycleBtn?.classList.toggle("is-active", !isDriving);
+    modeDrivingBtn?.setAttribute("aria-pressed", String(isDriving));
+    modeMotorcycleBtn?.setAttribute("aria-pressed", String(!isDriving));
+  }
+
+  function getRouteMode() {
+    return routeMode;
+  }
+
+  function bindRouteMode(onChange) {
+    modeDrivingBtn?.addEventListener("click", () => {
+      setRouteMode("driving");
+      onChange?.(routeMode);
+    });
+
+    modeMotorcycleBtn?.addEventListener("click", () => {
+      setRouteMode("motorcycle");
+      onChange?.(routeMode);
+    });
+  }
+
   function renderResults(results) {
     resultsList.innerHTML = "";
     resultCount.textContent = `${results.length} result${results.length === 1 ? "" : "s"}`;
@@ -114,6 +142,18 @@ export function createUiManager() {
     results.forEach((item, index) => {
       const source = String(item.source || item.provider || "manual").toUpperCase();
       const isFavorite = Boolean(item.isFavorite) || source === "FAVORITE";
+      
+      // SAFE ACCESS: Use a fallback (0) if the value is missing
+      const distanceValue = Number.isFinite(item.roadDistanceKm)
+        ? item.roadDistanceKm
+        : (Number.isFinite(item.route?.distanceKm) ? item.route.distanceKm : 0);
+      const distance = distanceValue.toFixed(2);
+
+      const durationValue = Number.isFinite(item.route?.durationMin)
+        ? item.route.durationMin
+        : 0;
+      const duration = durationValue.toFixed(0);
+      
       const canSaveFavorite = !isFavorite;
       const favoriteActionHtml = canSaveFavorite
         ? `<button class="favorite-marker-btn" type="button" data-action="favorite" data-destination-id="${item.id}"><i class="fa-solid fa-heart" aria-hidden="true"></i> Save Favorite</button>`
@@ -122,14 +162,13 @@ export function createUiManager() {
       const li = document.createElement("li");
       li.className = "result-item";
       li.dataset.destinationId = String(item.id);
-      li.dataset.destId = String(item.id);
       li.innerHTML = `
         <div class="result-top">
           <p class="result-name">${index + 1}. ${item.name}</p>
-          <span class="distance-chip">Road ${item.roadDistanceKm.toFixed(2)} km</span>
+          <span class="distance-chip">Road ${distance} km</span>
         </div>
         <p class="result-meta">Source: ${source}</p>
-        <p class="result-meta">ETA: ${item.route.durationMin.toFixed(0)} min (approx.)</p>
+        <p class="result-meta">ETA: ${duration} min (approx.)</p>
         <span class="result-method">Method: ${item.method || "MANUAL"}</span>
         <button class="add-marker-btn" type="button" data-action="focus" data-destination-id="${item.id}">Focus Marker</button>
         ${favoriteActionHtml}
@@ -423,6 +462,7 @@ export function createUiManager() {
 
   modalFactory.initIntroductionModal();
   overlayManager.initialize();
+  setRouteMode(routeMode);
 
   const controlsToggleBtn = document.getElementById("controls-master-toggle");
   const controlsStackContent = document.getElementById("controls-stack-content");
@@ -455,6 +495,8 @@ export function createUiManager() {
       pickOnMapBtn,
       calculateBtn,
       clearBtn,
+      modeDrivingBtn,
+      modeMotorcycleBtn,
     },
     state: {
       getDestinationRows: rowManager.getDestinationRows,
@@ -462,6 +504,7 @@ export function createUiManager() {
       setActiveDestination,
       setRowVerificationState: rowManager.setRowVerificationState,
       updateDestinationLabels: rowManager.updateDestinationLabels,
+      getRouteMode,
     },
     addDestinationRow: rowManager.addDestinationRow,
     removeDestinationRow: rowManager.removeDestinationRow,
@@ -485,5 +528,6 @@ export function createUiManager() {
     bindOriginAutocomplete,
     bindDestinationAutocomplete,
     bindDelegatedActions,
+    bindRouteMode,
   };
 }

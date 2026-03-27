@@ -1,6 +1,168 @@
+const ROUTE_ENDPOINTS_BY_MODE = {
+  car: [
+    "https://routing.openstreetmap.de/routed-car/route/v1/driving",
+    "https://router.project-osrm.org/route/v1/driving",
+  ],
+  motorcycle: [
+    "https://routing.openstreetmap.de/routed-bike/route/v1/bicycle",
+  ],
+};
+
+function normalizeRoutePoint(point) {
+  if (!point || typeof point !== "object") return null;
+  const lat = Number(point.lat);
+  const lng = Number(point.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { lat, lng };
+}
+
+function normalizeRoutePoints(inputPoints, maybeDestination) {
+  if (Array.isArray(inputPoints)) {
+    return inputPoints.map(normalizeRoutePoint).filter(Boolean);
+  }
+  return [normalizeRoutePoint(inputPoints), normalizeRoutePoint(maybeDestination)].filter(Boolean);
+}
+
+function buildRouteQuery(points) {
+  return points.map((point) => `${point.lng},${point.lat}`).join(";");
+}
+
+function buildPublicOsrmUrlsByMode(points, mode = "driving") {
+  const normalizedMode = mode === "motorcycle" ? "motorcycle" : (mode === "car" ? "car" : "car");
+  const endpoints = ROUTE_ENDPOINTS_BY_MODE[normalizedMode] || ROUTE_ENDPOINTS_BY_MODE.car;
+  const coordinateString = buildRouteQuery(points);
+  return endpoints.map((base) => `${base}/${coordinateString}?overview=full&geometries=geojson&steps=false&alternatives=false`);
+}
+
+function haversineMeters(a, b) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const earthRadiusMeters = 6371000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLng = Math.sin(dLng / 2);
+  const h = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+  return 2 * earthRadiusMeters * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function buildFerryFallbackPayload(points, mode = "driving") {
+  const coordinates = points.map((point) => [point.lng, point.lat]);
+  let distanceM = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    distanceM += haversineMeters(points[i - 1], points[i]);
+  }
+  const speedMps = mode === "motorcycle" ? 9.0 : 8.0;
+  const durationS = distanceM > 0 ? distanceM / speedMps : 0;
+
+  return {
+    routes: [
+      {
+        geometry: { type: "LineString", coordinates },
+        distance: distanceM,
+        duration: durationS,
+        weight: durationS,
+        isFerryFallback: true,
+        method: "FERRY_FALLBACK",
+      },
+    ],
+    code: "Ok",
+    isFerryFallback: true,
+  };
+}
+
+/**
+ * Transform OSRM GeoJSON [lng, lat] coordinates into Leaflet [lat, lng].
+ */
+export function flipCoords(coordinates = []) {
+  return (coordinates || [])
+    .filter((item) => Array.isArray(item) && item.length >= 2)
+    .map(([lng, lat]) => [Number(lat), Number(lng)])
+    .filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng));
+}
+
+/**
+ * Robust route fetcher with optional proxy support.
+ * For production, prefer passing proxyUrl to avoid public OSRM CORS variance.
+ */
+export async function fetchRoute(inputPoints, maybeDestination, options = {}) {
+  const points = normalizeRoutePoints(inputPoints, maybeDestination);
+  if (points.length < 2) {
+    throw new Error("ROUTING_INVALID_POINTS: At least 2 valid coordinates are required.");
+  }
+
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 12000;
+
+  // Preferred path: your own backend proxy endpoint.
+  if (options.proxyUrl) {
+    const signalController = new AbortController();
+    const timeoutId = setTimeout(() => signalController.abort(), timeoutMs);
+
+    try {
+      const query = new URLSearchParams({
+        coords: buildRouteQuery(points),
+      });
+      const response = await fetch(`${options.proxyUrl}?${query.toString()}`, {
+        method: "GET",
+        signal: signalController.signal,
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(`ROUTING_PROXY_FAILED: HTTP ${response.status} ${text}`.trim());
+      }
+
+      const data = await response.json();
+      return data;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  // Fallback path: public OSRM mirrors (browser may still be CORS-blocked depending on endpoint policy).
+  const selectedMode = options.mode === "motorcycle" ? "motorcycle" : (options.mode === "car" ? "car" : "car");
+  const urls = buildPublicOsrmUrlsByMode(points, selectedMode);
+  let lastError = null;
+
+  for (const url of urls) {
+    const signalController = new AbortController();
+    const timeoutId = setTimeout(() => signalController.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        mode: "cors",
+        signal: signalController.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      lastError = error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  if (options.allowFerry !== false) {
+    return buildFerryFallbackPayload(points, selectedMode);
+  }
+
+  const reason = String(lastError?.message || "Unknown routing failure");
+  throw new Error(`ROUTING_REQUEST_FAILED: ${reason}. If this is a browser CORS block, use options.proxyUrl with a backend proxy.`);
+}
+
 export function createRouteInteractionService() {
-  let activeRouteId = null;
-  let customWaypoints = [];
+  const routeWaypointsMap = new Map();
+
+  function normalizeWaypointType(type) {
+    return type === "shaping" ? "shaping" : "via";
+  }
 
   function createWaypointId() {
     if (window.crypto?.randomUUID) return `wp-${window.crypto.randomUUID()}`;
@@ -18,71 +180,10 @@ export function createRouteInteractionService() {
   function cloneWaypoint(point) {
     return {
       id: point?.id || createWaypointId(),
-      lat: Number(point.lat),
-      lng: Number(point.lng),
+      lat: Number(point?.lat),
+      lng: Number(point?.lng),
+      type: normalizeWaypointType(point?.type),
     };
-  }
-
-  function setActiveRoute(routeId, waypoints = []) {
-    if (routeId !== activeRouteId) {
-      activeRouteId = routeId || null;
-      customWaypoints = waypoints.map(cloneWaypoint);
-      return;
-    }
-
-    customWaypoints = waypoints.map(cloneWaypoint);
-  }
-
-  function clearActiveRoute() {
-    activeRouteId = null;
-    customWaypoints = [];
-  }
-
-  function getActiveRouteId() {
-    return activeRouteId;
-  }
-
-  function getCustomWaypoints() {
-    return customWaypoints.map(cloneWaypoint);
-  }
-
-  function updateWaypointAt(index, nextLatLng) {
-    if (!Number.isInteger(index) || index < 0 || index >= customWaypoints.length) return null;
-    const normalized = toLeafletLatLng(nextLatLng);
-    if (!normalized) return null;
-
-    customWaypoints[index] = {
-      id: customWaypoints[index]?.id || createWaypointId(),
-      lat: normalized.lat,
-      lng: normalized.lng,
-    };
-    return customWaypoints[index];
-  }
-
-  function removeWaypoint(id) {
-    const waypointId = String(id || "").trim();
-    if (!waypointId) return getCustomWaypoints();
-
-    const index = customWaypoints.findIndex((item) => String(item?.id || "") === waypointId);
-    if (index === -1) return getCustomWaypoints();
-
-    customWaypoints.splice(index, 1);
-    return getCustomWaypoints();
-  }
-
-  function removeWaypointAt(index) {
-    if (!Number.isInteger(index) || index < 0 || index >= customWaypoints.length) return null;
-    const target = customWaypoints[index];
-    const updated = removeWaypoint(target?.id);
-    return Array.isArray(updated) ? (target || null) : null;
-  }
-
-  function getFormattedOSRMString(origin, destination) {
-    const points = [origin, ...customWaypoints, destination]
-      .filter(Boolean)
-      .map((point) => `${Number(point.lng)},${Number(point.lat)}`);
-
-    return points.join(";");
   }
 
   function flattenRouteLatLngs(currentRoutePolyline) {
@@ -97,7 +198,6 @@ export function createRouteInteractionService() {
         queue.unshift(...item);
         continue;
       }
-
       const latLng = toLeafletLatLng(item);
       if (latLng) flattened.push(latLng);
     }
@@ -114,7 +214,6 @@ export function createRouteInteractionService() {
     const abY = projectedB.y - projectedA.y;
     const apX = projectedP.x - projectedA.x;
     const apY = projectedP.y - projectedA.y;
-
     const abLenSquared = abX * abX + abY * abY;
     const t = abLenSquared === 0 ? 0 : Math.max(0, Math.min(1, (apX * abX + apY * abY) / abLenSquared));
 
@@ -131,20 +230,13 @@ export function createRouteInteractionService() {
     if (!point) return 0;
 
     const mapRef = currentRoutePolyline?._map;
-
     let minDistance = Number.POSITIVE_INFINITY;
     let bestIndex = 0;
 
     for (let i = 0; i < routePoints.length - 1; i += 1) {
-      let distance;
-
-      if (mapRef) {
-        distance = distancePointToSegmentMeters(routePoints[i], routePoints[i + 1], point, mapRef);
-      } else {
-        const a = routePoints[i].distanceTo(point);
-        const b = routePoints[i + 1].distanceTo(point);
-        distance = Math.min(a, b);
-      }
+      const distance = mapRef
+        ? distancePointToSegmentMeters(routePoints[i], routePoints[i + 1], point, mapRef)
+        : Math.min(routePoints[i].distanceTo(point), routePoints[i + 1].distanceTo(point));
 
       if (distance < minDistance) {
         minDistance = distance;
@@ -155,44 +247,29 @@ export function createRouteInteractionService() {
     return bestIndex;
   }
 
-  function findInsertionIndex(newLatlng, currentRoutePolyline) {
+  function findInsertionIndex(destinationId, newLatlng, currentRoutePolyline) {
     const point = toLeafletLatLng(newLatlng);
-    if (!point) return customWaypoints.length;
+    const currentWaypoints = routeWaypointsMap.get(destinationId) || [];
+    if (!point) return currentWaypoints.length;
 
     const routePoints = flattenRouteLatLngs(currentRoutePolyline);
-    if (routePoints.length < 2) return customWaypoints.length;
+    if (routePoints.length < 2) return currentWaypoints.length;
 
     const routeDistanceTotals = [0];
     for (let i = 1; i < routePoints.length; i += 1) {
-      const step = routePoints[i - 1].distanceTo(routePoints[i]);
-      routeDistanceTotals[i] = routeDistanceTotals[i - 1] + step;
+      routeDistanceTotals[i] = routeDistanceTotals[i - 1] + routePoints[i - 1].distanceTo(routePoints[i]);
     }
 
     const closestSegmentIndex = findClosestSegmentIndex(point, currentRoutePolyline);
     const projectedBaseDistance = routeDistanceTotals[closestSegmentIndex] || 0;
 
-    const rankedWaypoints = customWaypoints.map((waypoint, index) => {
-      const wp = L.latLng(waypoint.lat, waypoint.lng);
-
-      if (L.GeometryUtil?.closestOnSegment) {
-        let bestDist = Number.POSITIVE_INFINITY;
-        let bestAlong = 0;
-
-        for (let i = 0; i < routePoints.length - 1; i += 1) {
-          const snapped = L.GeometryUtil.closestOnSegment(currentRoutePolyline._map, wp, routePoints[i], routePoints[i + 1]);
-          const segmentDist = wp.distanceTo(snapped);
-          if (segmentDist < bestDist) {
-            bestDist = segmentDist;
-            bestAlong = routeDistanceTotals[i];
-          }
-        }
-
-        return { index, along: bestAlong };
-      }
-
-      const segmentIndex = findClosestSegmentIndex(wp, currentRoutePolyline);
-      return { index, along: routeDistanceTotals[segmentIndex] || 0 };
-    }).sort((a, b) => a.along - b.along);
+    const rankedWaypoints = currentWaypoints
+      .map((waypoint, index) => {
+        const wp = L.latLng(waypoint.lat, waypoint.lng);
+        const segmentIndex = findClosestSegmentIndex(wp, currentRoutePolyline);
+        return { index, along: routeDistanceTotals[segmentIndex] || 0 };
+      })
+      .sort((a, b) => a.along - b.along);
 
     let insertionIndex = rankedWaypoints.length;
     for (let i = 0; i < rankedWaypoints.length; i += 1) {
@@ -202,33 +279,113 @@ export function createRouteInteractionService() {
       }
     }
 
-    return Math.max(0, Math.min(insertionIndex, customWaypoints.length));
+    return Math.max(0, Math.min(insertionIndex, currentWaypoints.length));
   }
 
-  function insertWaypoint(newLatlng, currentRoutePolyline) {
-    const normalized = toLeafletLatLng(newLatlng);
-    if (!normalized) return { index: customWaypoints.length, waypoint: null };
+  function getWaypointsForRoute(destinationId) {
+    return (routeWaypointsMap.get(destinationId) || []).map(cloneWaypoint);
+  }
 
-    const index = findInsertionIndex(normalized, currentRoutePolyline);
-    const waypoint = {
-      id: createWaypointId(),
+  function setWaypointsForRoute(destinationId, waypoints = []) {
+    routeWaypointsMap.set(destinationId, waypoints.map(cloneWaypoint));
+    return getWaypointsForRoute(destinationId);
+  }
+
+  function clearWaypointsForRoute(destinationId) {
+    routeWaypointsMap.delete(destinationId);
+  }
+
+  function clearAllRoutes() {
+    routeWaypointsMap.clear();
+  }
+
+  function insertWaypoint(destinationId, newLatlng, currentRoutePolyline) {
+    const normalized = toLeafletLatLng(newLatlng);
+    const currentWaypoints = routeWaypointsMap.get(destinationId) || [];
+    if (!normalized) return { index: currentWaypoints.length, waypoint: null };
+
+    const index = findInsertionIndex(destinationId, normalized, currentRoutePolyline);
+    const waypoint = { id: createWaypointId(), lat: normalized.lat, lng: normalized.lng, type: "via" };
+    currentWaypoints.splice(index, 0, waypoint);
+    routeWaypointsMap.set(destinationId, currentWaypoints);
+    return { index, waypoint: cloneWaypoint(waypoint) };
+  }
+
+  function updateWaypointAt(destinationId, index, nextLatLng) {
+    const currentWaypoints = routeWaypointsMap.get(destinationId) || [];
+    if (!Number.isInteger(index) || index < 0 || index >= currentWaypoints.length) return null;
+
+    const normalized = toLeafletLatLng(nextLatLng);
+    if (!normalized) return null;
+
+    const next = {
+      id: currentWaypoints[index]?.id || createWaypointId(),
       lat: normalized.lat,
       lng: normalized.lng,
+      type: normalizeWaypointType(currentWaypoints[index]?.type),
     };
-    customWaypoints.splice(index, 0, waypoint);
-    return { index, waypoint };
+    currentWaypoints[index] = next;
+    routeWaypointsMap.set(destinationId, currentWaypoints);
+    return cloneWaypoint(next);
+  }
+
+  function removeWaypoint(destinationId, waypointId) {
+    const currentWaypoints = routeWaypointsMap.get(destinationId) || [];
+    const needle = String(waypointId || "").trim();
+    if (!needle) return getWaypointsForRoute(destinationId);
+
+    const index = currentWaypoints.findIndex((item) => String(item?.id || "") === needle);
+    if (index === -1) return getWaypointsForRoute(destinationId);
+
+    currentWaypoints.splice(index, 1);
+    routeWaypointsMap.set(destinationId, currentWaypoints);
+    return getWaypointsForRoute(destinationId);
+  }
+
+  function removeWaypointAt(destinationId, index) {
+    const currentWaypoints = routeWaypointsMap.get(destinationId) || [];
+    if (!Number.isInteger(index) || index < 0 || index >= currentWaypoints.length) return null;
+    const removed = currentWaypoints[index];
+    currentWaypoints.splice(index, 1);
+    routeWaypointsMap.set(destinationId, currentWaypoints);
+    return cloneWaypoint(removed);
+  }
+
+  function setWaypointType(destinationId, waypointId, type) {
+    const currentWaypoints = routeWaypointsMap.get(destinationId) || [];
+    const needle = String(waypointId || "").trim();
+    if (!needle) return null;
+
+    const index = currentWaypoints.findIndex((item) => String(item?.id || "") === needle);
+    if (index === -1) return null;
+
+    const next = {
+      ...currentWaypoints[index],
+      type: normalizeWaypointType(type),
+    };
+    currentWaypoints[index] = next;
+    routeWaypointsMap.set(destinationId, currentWaypoints);
+    return cloneWaypoint(next);
+  }
+
+  function getFormattedOSRMString(destinationId, origin, destination) {
+    const points = [origin, ...getWaypointsForRoute(destinationId), destination]
+      .filter(Boolean)
+      .map((point) => `${Number(point.lng)},${Number(point.lat)}`);
+    return points.join(";");
   }
 
   return {
-    setActiveRoute,
-    clearActiveRoute,
-    getActiveRouteId,
-    getCustomWaypoints,
+    getWaypointsForRoute,
+    setWaypointsForRoute,
+    clearWaypointsForRoute,
+    clearAllRoutes,
+    insertWaypoint,
     updateWaypointAt,
     removeWaypoint,
     removeWaypointAt,
+    setWaypointType,
     findInsertionIndex,
-    insertWaypoint,
     getFormattedOSRMString,
   };
 }

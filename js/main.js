@@ -6,6 +6,7 @@ import { FavRepository } from "./repositories/favRepository.js";
 const ui = createUiManager();
 const favRepo = new FavRepository();
 const mapCtrl = createMapController({
+  getRouteMode: () => ui.state.getRouteMode(),
   onOriginDragged: async (coords) => {
     ui.elements.originInput.value = `${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`;
     ui.setStatus("Origin moved. Recomputing routes...");
@@ -92,47 +93,46 @@ async function recalculateRoutes() {
 
   mapCtrl.setOrigin({ lat: originResolved.lat, lng: originResolved.lng }, originResolved.label, false);
 
-  const unresolved = [];
-  const routed = [];
-
-  for (const row of ui.state.getFilledDestinationRows()) {
+  const filledRows = ui.state.getFilledDestinationRows();
+  
+  // PHASE 1: Resolve all locations in parallel
+  const resolutionPromises = filledRows.map(async (row) => {
     let resolved = null;
-    if (row.sourceOfTruth === "manual-drag" && row.coords) {
-      const isFavoriteRow = Boolean(row.isFavorite) || String(row.provider || "").toUpperCase() === "FAVORITE";
-      resolved = {
-        ...row.coords,
-        label: row.input.value,
-        provider: row.provider || "manual",
-        needsVerification: false,
-        markerTone: isFavoriteRow ? "pink" : "default",
-        isFavorite: isFavoriteRow,
-      };
-    } else if (row.coords) {
-      const isFavoriteRow = Boolean(row.isFavorite) || String(row.provider || "").toUpperCase() === "FAVORITE";
-      resolved = {
-        ...row.coords,
-        label: row.input.value,
-        provider: row.provider || "manual",
-        markerTone: isFavoriteRow ? "pink" : "default",
-        isFavorite: isFavoriteRow,
-      };
-    }
 
-    if (!resolved) {
+    // Use existing coords if manually dragged or already present
+    if (row.coords) {
+      const isFavoriteRow = Boolean(row.isFavorite) || String(row.provider || "").toUpperCase() === "FAVORITE";
+      resolved = {
+        lat: row.coords.lat,
+        lng: row.coords.lng,
+        label: row.input.value,
+        provider: row.provider || "manual",
+        markerTone: isFavoriteRow ? "pink" : "default",
+        isFavorite: isFavoriteRow,
+        needsVerification: row.sourceOfTruth !== "manual-drag"
+      };
+    } else {
+      // Parallelized hierarchical search happens here
       resolved = await resolveLocation(row.input.value.trim(), getMapContext());
     }
 
+    return { row, resolved };
+  });
+
+  const resolvedLayers = await Promise.all(resolutionPromises);
+
+  // PHASE 2: Calculate all routes in parallel
+  const selectedRouteMode = ui.state.getRouteMode();
+  const routingPromises = resolvedLayers.map(async ({ row, resolved }) => {
     if (!resolved) {
-      unresolved.push({ row: row.displayIndex || "?", value: row.input.value, reason: "Address not resolved" });
-      continue;
+      return { row, error: "Address not resolved" };
     }
 
+    // Update UI State for the row
     row.coords = { lat: resolved.lat, lng: resolved.lng };
     row.provider = resolved.provider || "manual";
-    row.isFavorite = Boolean(resolved.isFavorite) || String(row.provider || "").toUpperCase() === "FAVORITE";
-    if (row.sourceOfTruth !== "manual-drag") row.sourceOfTruth = "query";
+    row.isFavorite = !!resolved.isFavorite;
     row.label = resolved.label || row.input.value;
-    row.input.value = row.label;
 
     ui.state.setRowVerificationState(row.rowId, resolved.needsVerification ? "imprecise" : "exact");
     mapCtrl.setDestinationMarker(row.rowId, row.coords, row.label, false, {
@@ -140,27 +140,44 @@ async function recalculateRoutes() {
       isFavorite: row.isFavorite,
     });
 
-    const route = await routeBetween({ lat: originResolved.lat, lng: originResolved.lng }, row.coords);
+    // Fire the route request
+    const route = await routeBetween({ lat: originResolved.lat, lng: originResolved.lng }, row.coords, {
+      mode: selectedRouteMode,
+      allowFerry: true,
+    });
+    
     if (!route) {
-      unresolved.push({ row: row.displayIndex || "?", value: row.input.value, reason: "No drivable route" });
-      continue;
+      return { row, error: "No drivable route" };
     }
 
-    routed.push({
+    return {
       id: row.rowId,
       name: row.label,
       coords: row.coords,
       provider: row.provider,
-      source: String(row.provider || "").toUpperCase() === "FAVORITE" ? "FAVORITE" : "QUERY",
+      source: row.isFavorite ? "FAVORITE" : "QUERY",
       isFavorite: row.isFavorite,
       route,
       roadDistanceKm: route.distanceKm,
       method: resolved.method,
+      routeMode: selectedRouteMode,
       waypoints: [],
-    });
-  }
+    };
+  });
+
+  const finalResults = await Promise.all(routingPromises);
+
+  // PHASE 3: Filter and Sort
+  const routed = finalResults.filter(r => r.route);
+  const unresolved = finalResults.filter(r => r.error).map(r => ({
+    row: r.row.displayIndex || "?",
+    value: r.row.input.value,
+    reason: r.error
+  }));
 
   latestResults = routed.sort((a, b) => a.roadDistanceKm - b.roadDistanceKm);
+  
+  // Render Everything
   mapCtrl.drawRoutes(latestResults);
   mapCtrl.fitToRoutesAndOrigin();
   ui.renderResults(latestResults);
@@ -170,7 +187,7 @@ async function recalculateRoutes() {
     ui.setDestinationErrors(unresolved);
   }
 
-  ui.setStatus(`Calculated ${latestResults.length} destination route(s).`);
+  ui.setStatus(`Calculated ${latestResults.length} routes.`);
 }
 
 function selectResult(destinationId) {
@@ -249,6 +266,14 @@ ui.bindFavoriteControls({
 });
 
 ui.elements.addDestinationBtn.addEventListener("click", () => ui.addDestinationRow());
+ui.bindRouteMode(async (mode) => {
+  ui.setStatus(`Route mode: ${mode}. Recomputing routes...`);
+  if (latestResults.length > 0) {
+    ui.clearFieldErrors();
+    ui.setLoading(true);
+    try { await recalculateRoutes(); } finally { ui.setLoading(false); }
+  }
+});
 ui.elements.calculateBtn.addEventListener("click", async () => {
   ui.clearFieldErrors();
   ui.setLoading(true);

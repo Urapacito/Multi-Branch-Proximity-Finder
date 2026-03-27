@@ -42,10 +42,6 @@ export function createOverlayManager({ mapElement, loadingIndicator }) {
         <span class="route-hover-value" data-role="remaining">0 m</span>
         <span class="route-hover-label">to dest.</span>
       </div>
-      <div class="route-hover-action" data-role="remove-hint" aria-hidden="true">
-        <i class="fa-solid fa-xmark" aria-hidden="true"></i>
-        <span>Double-click to remove</span>
-      </div>
     `;
 
     parent.appendChild(routeHoverTooltip);
